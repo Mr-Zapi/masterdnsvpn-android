@@ -1,0 +1,46 @@
+__pycache__
+server_config.py
+client_config.py
+server_config.toml
+client_config.toml
+client_resolvers.txt
+encrypt_key.txt
+local_dns_cache.json
+local_dns_cache.bin
+*.key
+*.pem
+*.crt
+.vscode/
+.env
+.DS_Store
+logs/
+*.log
+*.zip
+*.tar.gz
+*.bak
+*.tmp
+*.exe
+build/
+.gocache
+.bench/
+
+# Android build outputs
+android/.gradle/
+android/build/
+android/app/build/
+android/.kotlin/
+android/local.properties
+android/keystore.properties
+
+# Built native library (produced by scripts/build-android-aar.sh)
+android/app/libs/mobile.aar
+
+# Signing material — never commit
+*.jks
+*.keystore
+
+# Artifacts
+*.apk
+android/file_log.txt
+.idea/
+*.iml

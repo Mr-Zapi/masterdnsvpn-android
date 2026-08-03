@@ -1,0 +1,3 @@
+# Copy to local.properties and adjust the path to your Android SDK.
+# The SDK dir is where cmdline-tools installed the platform + build-tools + ndk.
+sdk.dir=/home/zapi/Android/Sdk
