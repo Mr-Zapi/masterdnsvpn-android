@@ -21,12 +21,126 @@ DNS tunnel. It carries **all device traffic** through the tunnel using Android's
 The Go client + tun2socks are compiled into a single native library
 (`mobile.aar`) via gomobile. The Kotlin app establishes the TUN interface and
 hands its fd to the Go core. DNS is resolved directly via public resolvers
-(Yandex by default) over a VPN-protected socket, which is both fast and robust
-across devices.
+(Yandex by default) over a VPN-protected socket, which is fast and robust across
+devices.
 
-## Build
+---
 
-You need JDK 17+, Go 1.25+, and the Android SDK + NDK.
+## 📥 Install the app
+
+Grab the latest **`app-release.apk`** from the
+[Releases](../../releases) page and install it on your phone
+(allow *install from unknown sources*). On first **Connect**, accept the system
+VPN dialog.
+
+> Prefer to build it yourself? See [Build from source](#-build-from-source) below.
+
+You still need a **server** (next section) and the **config** to paste into the app.
+
+---
+
+## 🖥️ Set up the server (VPS)
+
+A DNS tunnel needs a server on a VPS **and** a domain whose DNS is delegated to
+that VPS.
+
+### 1. Point a subdomain's NS at your VPS
+
+In your domain's DNS panel (Cloudflare, etc.), create these records — all as
+**DNS only** (grey cloud, *not* proxied):
+
+| Name              | Type | Value             |
+| ----------------- | ---- | ----------------- |
+| `ns.example.com`  | A    | `<YOUR_VPS_IP>`   |
+| `t.example.com`   | NS   | `ns.example.com`  |
+
+This delegates everything under `t.example.com` to your VPS. `t.example.com` is
+your **tunnel domain**. (Wait a few minutes for propagation.)
+
+> ⚠️ If your DNS provider offers "proxy"/CDN, keep these records **DNS only** —
+> a proxied record hides port 53 and the tunnel won't work.
+
+### 2. Install the server
+
+SSH into the VPS and run the official installer:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh)
+```
+
+- When asked for the domain, enter your tunnel domain (e.g. `t.example.com`).
+- It frees port 53 (disables `systemd-resolved` stub), opens the firewall,
+  installs a `systemd` service, and prints your **encryption key**.
+
+Useful commands:
+
+```bash
+systemctl status masterdnsvpn
+journalctl -u masterdnsvpn -f      # live logs
+```
+
+### 3. Encryption key
+
+The installer generates a key automatically and stores it in
+`/root/encrypt_key.txt`. To use your own (recommended for real use):
+
+```bash
+openssl rand -hex 32 > /root/encrypt_key.txt         # new random key
+sed -i 's/^DATA_ENCRYPTION_METHOD = .*/DATA_ENCRYPTION_METHOD = 2/' /root/server_config.toml  # ChaCha20
+systemctl restart masterdnsvpn
+```
+
+`DATA_ENCRYPTION_METHOD`: `0`=None `1`=XOR `2`=ChaCha20 `3`=AES-128-GCM
+`4`=AES-192-GCM `5`=AES-256-GCM. **This number and the key must match the app.**
+
+### 4. Verify
+
+```bash
+dig +short test.t.example.com @<YOUR_VPS_IP>
+```
+
+A response (not `connection refused`) means the server is listening and
+delegation works.
+
+---
+
+## 📱 Configure the app
+
+The app has two fields.
+
+### Config (base64 JSON)
+
+Build a JSON config with your tunnel domain, method and key, then base64-encode
+it:
+
+```bash
+KEY=$(cat /root/encrypt_key.txt)   # or your key
+printf '%s' "{\"DOMAINS\":[\"t.example.com\"],\"DATA_ENCRYPTION_METHOD\":2,\"ENCRYPTION_KEY\":\"$KEY\"}" | base64 -w0
+```
+
+Paste the resulting string into the **Config** field.
+
+### Resolvers
+
+Public DNS resolvers the tunnel sends its queries *through*. Pre-filled with
+**Yandex DNS** (reachable in Russia during blocking); you can add more:
+
+```
+77.88.8.8:53
+77.88.8.1:53
+```
+
+Then tap **Connect**.
+
+> Tip: on the phone, set **Settings → Private DNS → Off** (or *Automatic*). A
+> fixed Private DNS hostname sends DNS over TLS and breaks resolution.
+
+---
+
+## 🔨 Build from source
+
+Requires JDK 17+, Go 1.25+, Android SDK + NDK. Full toolchain setup (no Android
+Studio needed) is in [`android/README.md`](android/README.md).
 
 ```bash
 # 1) native library
@@ -34,16 +148,12 @@ export ANDROID_HOME=$HOME/Android/Sdk
 export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/<version>
 ./scripts/build-android-aar.sh          # -> android/app/libs/mobile.aar
 
-# 2) debug APK
+# 2) debug APK (auto-signed, for yourself)
 cd android
 ./gradlew assembleDebug                  # -> app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Full setup (installing the SDK/NDK from scratch, no Android Studio needed) and
-the in-app configuration format are documented in
-[`android/README.md`](android/README.md).
-
-## Release build (for sharing)
+### Signed release APK (to share)
 
 ```bash
 keytool -genkey -v -keystore ~/masterdns.jks -keyalg RSA -keysize 2048 \
@@ -53,12 +163,9 @@ cd android && ./gradlew assembleRelease  # -> app/build/outputs/apk/release/app-
 ```
 
 Keep your `.jks` and `keystore.properties` out of git (already in `.gitignore`).
+Upload `app-release.apk` to a GitHub **Release** so others can download it.
 
-## Server
-
-This is the **client** only. You also need a MasterDnsVPN **server** on a VPS
-and a domain whose NS record is delegated to it — see the upstream project and
-[`android/README.md`](android/README.md).
+---
 
 ## Credits & license
 
