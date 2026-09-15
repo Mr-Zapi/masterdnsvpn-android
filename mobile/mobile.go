@@ -88,11 +88,14 @@ func mobileSpeedOverrides() map[string]any {
 		// Discover resolvers on more parallel probes (faster startup only).
 		"MTUTestParallelism": 32,
 		// Dedicated download pullers: keep extra empty poll requests in flight
-		// on the best resolvers so the server returns more download fragments
-		// per RTT than the ACK-clocked flow alone. Use up to 25% of the active
-		// resolvers as download-only resolvers; 0 disables the pump.
-		"DownloadPumpResolversPercent": 25,
-		"DownloadPumpConcurrency":      6,
+		// on a dedicated share of the resolver pool so the server returns more
+		// download fragments per RTT than the ACK-clocked flow alone. The pool
+		// is split by direction: 25% of resolvers are reserved for download
+		// pulling (downlink) and 75% carry upload/control traffic (uplink). The
+		// two sets are disjoint. Set DOWNLINK to 0 to disable the split.
+		"UplinkResolversPercent":   75,
+		"DownlinkResolversPercent": 25,
+		"DownloadPumpConcurrency":  6,
 	}
 }
 
@@ -175,13 +178,18 @@ func parseDNSServers(raw string) []string {
 //	                done directly through these servers over a VPN-protected
 //	                socket instead of through the DNS tunnel. Leave empty to
 //	                resolve through the tunnel.
+//	uplinkPercent : share (0..100) of active resolvers reserved for upload and
+//	                control traffic. Negative means "use the config/default".
+//	downlinkPercent: share (0..100) of active resolvers reserved for download
+//	                pulling. Negative means "use the config/default". The two
+//	                pools are disjoint (a resolver is never in both).
 //	filesDir      : a writable directory (Context.getFilesDir().getAbsolutePath())
 //	protector     : Android VpnService protector (may be nil); required for
 //	                directDNS so the queries bypass the tunnel.
 //
 // It returns nil on success. On failure everything is torn down and a non-nil
 // error is returned.
-func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText string, directDNS string, filesDir string, protector Protector) error {
+func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText string, directDNS string, uplinkPercent int, downlinkPercent int, filesDir string, protector Protector) error {
 	mu.Lock()
 	if running.Load() || starting {
 		mu.Unlock()
@@ -235,6 +243,12 @@ func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText st
 	}
 	for key, value := range mobileSpeedOverrides() {
 		overrides.Values[key] = value
+	}
+
+	// The UI-provided split overrides the built-in defaults when present.
+	if uplinkPercent >= 0 && downlinkPercent >= 0 {
+		overrides.Values["UplinkResolversPercent"] = uplinkPercent
+		overrides.Values["DownlinkResolversPercent"] = downlinkPercent
 	}
 
 	cfg, err := config.LoadClientConfigFromJSONBase64WithOverrides(configB64, overrides)

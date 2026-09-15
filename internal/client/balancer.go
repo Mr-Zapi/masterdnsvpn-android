@@ -12,6 +12,7 @@ package client
 import (
 	"encoding/binary"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,6 +97,17 @@ type Balancer struct {
 	stats        []*connectionStats
 	streamRoutes map[uint16]*balancerStreamRouteState
 
+	// Directional split. activeIDs holds every healthy resolver (used for
+	// health checks and session MTU). uplinkActiveIDs and downlinkActiveIDs are
+	// a disjoint partition of activeIDs: upload/control selection only ever uses
+	// uplinkActiveIDs, while dedicated download pullers only use
+	// downlinkActiveIDs. When downlinkPercent is 0 the split is disabled and
+	// uplinkActiveIDs mirrors activeIDs with downlinkActiveIDs left empty.
+	downlinkPercent   int
+	uplinkActiveIDs   []int
+	downlinkActiveIDs []int
+	uplinkFlags       []bool
+
 	pendingShards [resolverPendingShardCount]balancerPendingShard
 
 	streamFailoverThreshold int
@@ -164,6 +176,26 @@ func (b *Balancer) SetAutoDisableConfig(enabled bool, window time.Duration) {
 	b.mu.Unlock()
 }
 
+// SetDownlinkPercent configures what share (0..100) of the healthy resolver
+// pool is reserved for download pulling. The remaining resolvers carry upload
+// and control traffic. A value <= 0 disables the split.
+func (b *Balancer) SetDownlinkPercent(percent int) {
+	if b == nil {
+		return
+	}
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+
+	b.mu.Lock()
+	b.downlinkPercent = percent
+	b.repartitionLocked()
+	b.mu.Unlock()
+}
+
 func (b *Balancer) SetResolverDisabledHandler(handler func(*Connection, string)) {
 	if b == nil {
 		return
@@ -191,6 +223,8 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 	b.indexByKey = make(map[string]int, size)
 	b.activeIDs = make([]int, 0, size)
 	b.inactiveIDs = make([]int, 0, size)
+	b.uplinkActiveIDs = make([]int, 0, size)
+	b.downlinkActiveIDs = make([]int, 0, size)
 	b.stats = make([]*connectionStats, 0, size)
 	for i := range b.pendingShards {
 		shard := &b.pendingShards[i]
@@ -229,6 +263,7 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 		b.stats = append(b.stats, &connectionStats{})
 	}
 
+	b.repartitionLocked()
 }
 
 func (b *Balancer) ActiveCount() int {
@@ -301,6 +336,7 @@ func (b *Balancer) SetConnectionMTU(key string, uploadBytes int, uploadChars int
 	b.connections[idx].UploadMTUBytes = uploadBytes
 	b.connections[idx].UploadMTUChars = uploadChars
 	b.connections[idx].DownloadMTUBytes = downloadBytes
+	b.repartitionLocked()
 	return true
 }
 
@@ -331,6 +367,7 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 	if wasValid != active {
 		b.moveConnectionStateLocked(idx, active)
 	}
+	b.repartitionLocked()
 
 	return true
 }
@@ -777,13 +814,13 @@ func (b *Balancer) GetBestConnection() (Connection, bool) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if len(b.activeIDs) == 0 {
+	if len(b.uplinkActiveIDs) == 0 {
 		return Connection{}, false
 	}
 
 	switch b.strategy {
 	case BalancingRandom:
-		idx := b.activeIDs[b.nextRandom()%uint64(len(b.activeIDs))]
+		idx := b.uplinkActiveIDs[b.nextRandom()%uint64(len(b.uplinkActiveIDs))]
 		return b.connections[idx], true
 	default:
 		if pool, pick, handled := b.strategyCandidatePoolLocked(""); handled {
@@ -809,7 +846,7 @@ func (b *Balancer) GetBestConnectionExcluding(excludeKey string) (Connection, bo
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if len(b.activeIDs) == 0 {
+	if len(b.uplinkActiveIDs) == 0 {
 		return Connection{}, false
 	}
 
@@ -847,6 +884,25 @@ func (b *Balancer) ActiveConnections() []Connection {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.connectionsByIDsLocked(b.activeIDs)
+}
+
+// DownloadConnections returns the resolvers reserved for download pulling. When
+// the directional split is disabled it falls back to the whole active pool, so
+// legacy DOWNLOAD_PUMP_* behaviour is preserved.
+func (b *Balancer) DownloadConnections() []Connection {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.downlinkActiveIDs) == 0 {
+		return b.connectionsByIDsLocked(b.activeIDs)
+	}
+	return b.connectionsByIDsLocked(b.downlinkActiveIDs)
+}
+
+// UploadConnections returns the resolvers eligible for upload/control traffic.
+func (b *Balancer) UploadConnections() []Connection {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.connectionsByIDsLocked(b.uplinkActiveIDs)
 }
 
 func (b *Balancer) InactiveConnections() []Connection {
@@ -936,8 +992,8 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	// 1. Normalize count: 1 <= requiredCount <= len(activeIDs)
-	requiredCount = normalizeRequiredCount(len(b.activeIDs), requiredCount, 1)
+	// 1. Normalize count: 1 <= requiredCount <= len(uplinkActiveIDs)
+	requiredCount = normalizeRequiredCount(len(b.uplinkActiveIDs), requiredCount, 1)
 	if requiredCount <= 0 {
 		return nil, ErrNoValidConnections
 	}
@@ -1085,6 +1141,10 @@ func (b *Balancer) validPreferredConnectionLocked(state *balancerStreamRouteStat
 	if !ok || !conn.IsValid || conn.Key == "" {
 		return Connection{}, false
 	}
+	// A resolver that was repartitioned to downlink must not carry uploads.
+	if idx, ok := b.indexByKey[state.PreferredResolverKey]; !ok || !b.isUplinkLocked(idx) {
+		return Connection{}, false
+	}
 	return *conn, true
 }
 
@@ -1125,15 +1185,79 @@ func (b *Balancer) moveConnectionStateLocked(idx int, valid bool) {
 	if valid {
 		b.removeInactiveIndexLocked(idx)
 		b.addActiveIndexLocked(idx)
+		b.repartitionLocked()
 		return
 	}
 
 	b.removeActiveIndexLocked(idx)
 	b.addInactiveIndexLocked(idx)
+	b.repartitionLocked()
+}
+
+// repartitionLocked rebuilds the disjoint uplink/downlink partition from the
+// current active set. Resolvers with the largest download MTU (then lowest probe
+// time) are assigned to downlink, matching what the download pump wants; every
+// other resolver stays on uplink. Must be called with b.mu held.
+func (b *Balancer) repartitionLocked() {
+	b.uplinkActiveIDs = b.uplinkActiveIDs[:0]
+	b.downlinkActiveIDs = b.downlinkActiveIDs[:0]
+
+	if len(b.uplinkFlags) != len(b.connections) {
+		b.uplinkFlags = make([]bool, len(b.connections))
+	} else {
+		clear(b.uplinkFlags)
+	}
+
+	total := len(b.activeIDs)
+	if total == 0 {
+		return
+	}
+
+	// Disabled split or a single resolver: everything is uplink.
+	if b.downlinkPercent <= 0 || total == 1 {
+		b.uplinkActiveIDs = append(b.uplinkActiveIDs, b.activeIDs...)
+		for _, idx := range b.uplinkActiveIDs {
+			if idx >= 0 && idx < len(b.uplinkFlags) {
+				b.uplinkFlags[idx] = true
+			}
+		}
+		return
+	}
+
+	downCount := total * b.downlinkPercent / 100
+	if downCount < 1 {
+		downCount = 1
+	}
+	if downCount >= total {
+		downCount = total - 1
+	}
+
+	ranked := make([]int, len(b.activeIDs))
+	copy(ranked, b.activeIDs)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		ci := b.connections[ranked[i]]
+		cj := b.connections[ranked[j]]
+		if ci.DownloadMTUBytes != cj.DownloadMTUBytes {
+			return ci.DownloadMTUBytes > cj.DownloadMTUBytes
+		}
+		return ci.MTUResolveTime < cj.MTUResolveTime
+	})
+
+	b.downlinkActiveIDs = append(b.downlinkActiveIDs, ranked[:downCount]...)
+	b.uplinkActiveIDs = append(b.uplinkActiveIDs, ranked[downCount:]...)
+	for _, idx := range b.uplinkActiveIDs {
+		if idx >= 0 && idx < len(b.uplinkFlags) {
+			b.uplinkFlags[idx] = true
+		}
+	}
+}
+
+func (b *Balancer) isUplinkLocked(idx int) bool {
+	return idx >= 0 && idx < len(b.uplinkFlags) && b.uplinkFlags[idx]
 }
 
 func (b *Balancer) selectInitialPreferredConnectionLocked() (Connection, bool) {
-	if len(b.activeIDs) == 0 {
+	if len(b.uplinkActiveIDs) == 0 {
 		return Connection{}, false
 	}
 
@@ -1157,8 +1281,8 @@ func (b *Balancer) selectInitialPreferredConnectionLocked() (Connection, bool) {
 		}
 
 		topN := 10
-		if len(b.activeIDs) < topN {
-			topN = len(b.activeIDs)
+		if len(b.uplinkActiveIDs) < topN {
+			topN = len(b.uplinkActiveIDs)
 		}
 
 		pool := b.selectLowestScoreLocked(topN, scorer)
@@ -1171,7 +1295,7 @@ func (b *Balancer) selectInitialPreferredConnectionLocked() (Connection, bool) {
 }
 
 func (b *Balancer) getUniqueConnectionsExcludingLocked(requiredCount int, excludeKey string) []Connection {
-	if requiredCount <= 0 || len(b.activeIDs) == 0 {
+	if requiredCount <= 0 || len(b.uplinkActiveIDs) == 0 {
 		return nil
 	}
 
@@ -1570,7 +1694,7 @@ func (b *Balancer) GetUniqueConnections(requiredCount int) []Connection {
 }
 
 func (b *Balancer) getUniqueConnectionsLocked(requiredCount int) []Connection {
-	count := normalizeRequiredCount(len(b.activeIDs), requiredCount, 1)
+	count := normalizeRequiredCount(len(b.uplinkActiveIDs), requiredCount, 1)
 	if count <= 0 {
 		return nil
 	}
@@ -1638,26 +1762,26 @@ func (b *Balancer) getBestConnectionExcludingLocked(excludeKey string) (Connecti
 }
 
 func (b *Balancer) selectRoundRobinLocked(count int) []Connection {
-	n := len(b.activeIDs)
+	n := len(b.uplinkActiveIDs)
 	start := roundRobinStartIndex(b.rrCounter.Add(uint64(count))-uint64(count), n)
 	selected := make([]Connection, count)
 	for i := 0; i < count; i++ {
-		selected[i] = b.connections[b.activeIDs[(start+i)%n]]
+		selected[i] = b.connections[b.uplinkActiveIDs[(start+i)%n]]
 	}
 	return selected
 }
 
 func (b *Balancer) selectRandomLocked(count int) []Connection {
-	n := len(b.activeIDs)
+	n := len(b.uplinkActiveIDs)
 	if count <= 0 || n == 0 {
 		return nil
 	}
 	if count == 1 {
-		idx := b.activeIDs[b.nextRandom()%uint64(n)]
+		idx := b.uplinkActiveIDs[b.nextRandom()%uint64(n)]
 		return []Connection{b.connections[idx]}
 	}
 
-	indices := append([]int(nil), b.activeIDs...)
+	indices := append([]int(nil), b.uplinkActiveIDs...)
 	for i := 0; i < count; i++ {
 		j := i + int(b.nextRandom()%uint64(n-i))
 		indices[i], indices[j] = indices[j], indices[i]
@@ -1666,7 +1790,7 @@ func (b *Balancer) selectRandomLocked(count int) []Connection {
 }
 
 func (b *Balancer) selectLowestScoreLocked(count int, scorer func(int) uint64) []Connection {
-	n := len(b.activeIDs)
+	n := len(b.uplinkActiveIDs)
 	if count <= 0 || n == 0 {
 		return nil
 	}
@@ -1755,15 +1879,15 @@ func (b *Balancer) bestScoredConnectionExcludingLocked(scorer func(int) uint64, 
 }
 
 func (b *Balancer) roundRobinBestConnectionLocked() (Connection, bool) {
-	if len(b.activeIDs) == 0 {
+	if len(b.uplinkActiveIDs) == 0 {
 		return Connection{}, false
 	}
-	pos := roundRobinStartIndex(b.rrCounter.Add(1)-1, len(b.activeIDs))
-	return b.connections[b.activeIDs[pos]], true
+	pos := roundRobinStartIndex(b.rrCounter.Add(1)-1, len(b.uplinkActiveIDs))
+	return b.connections[b.uplinkActiveIDs[pos]], true
 }
 
 func (b *Balancer) roundRobinBestConnectionExcludingLocked(excludeKey string) (Connection, bool) {
-	if len(b.activeIDs) == 0 {
+	if len(b.uplinkActiveIDs) == 0 {
 		return Connection{}, false
 	}
 	for _, idx := range b.rotatedActiveIndicesLocked(1) {
@@ -1776,17 +1900,17 @@ func (b *Balancer) roundRobinBestConnectionExcludingLocked(excludeKey string) (C
 }
 
 func (b *Balancer) rotatedActiveIndicesLocked(step int) []int {
-	if len(b.activeIDs) == 0 {
+	if len(b.uplinkActiveIDs) == 0 {
 		return nil
 	}
 	if step < 1 {
 		step = 1
 	}
 
-	start := roundRobinStartIndex(b.rrCounter.Add(uint64(step))-uint64(step), len(b.activeIDs))
-	ordered := make([]int, len(b.activeIDs))
-	for i := range b.activeIDs {
-		ordered[i] = b.activeIDs[(start+i)%len(b.activeIDs)]
+	start := roundRobinStartIndex(b.rrCounter.Add(uint64(step))-uint64(step), len(b.uplinkActiveIDs))
+	ordered := make([]int, len(b.uplinkActiveIDs))
+	for i := range b.uplinkActiveIDs {
+		ordered[i] = b.uplinkActiveIDs[(start+i)%len(b.uplinkActiveIDs)]
 	}
 	return ordered
 }
@@ -1799,7 +1923,7 @@ func roundRobinStartIndex(counter uint64, n int) int {
 }
 
 func (b *Balancer) hasLossSignalLocked() bool {
-	for _, idx := range b.activeIDs {
+	for _, idx := range b.uplinkActiveIDs {
 		stats := b.stats[idx]
 		if stats == nil {
 			continue
@@ -1813,7 +1937,7 @@ func (b *Balancer) hasLossSignalLocked() bool {
 }
 
 func (b *Balancer) hasLatencySignalLocked() bool {
-	for _, idx := range b.activeIDs {
+	for _, idx := range b.uplinkActiveIDs {
 		stats := b.stats[idx]
 		if stats == nil {
 			continue
@@ -1910,13 +2034,13 @@ func (b *Balancer) lossThenLatencyCandidatesLocked(excludeKey string) []Connecti
 		latency uint64
 	}
 
-	if !b.hasHybridSignalLocked() || len(b.activeIDs) == 0 {
+	if !b.hasHybridSignalLocked() || len(b.uplinkActiveIDs) == 0 {
 		return nil
 	}
 
-	candidates := make([]candidate, 0, len(b.activeIDs))
+	candidates := make([]candidate, 0, len(b.uplinkActiveIDs))
 	bestLoss := ^uint64(0)
-	for _, idx := range b.activeIDs {
+	for _, idx := range b.uplinkActiveIDs {
 		if excludeKey != "" && b.connections[idx].Key == excludeKey {
 			continue
 		}
@@ -1990,12 +2114,12 @@ func (b *Balancer) leastLossTopTierCandidatesLocked(excludeKey string) []Connect
 		loss uint64
 	}
 
-	if !b.hasLossSignalLocked() || len(b.activeIDs) == 0 {
+	if !b.hasLossSignalLocked() || len(b.uplinkActiveIDs) == 0 {
 		return nil
 	}
 
-	candidates := make([]candidate, 0, len(b.activeIDs))
-	for _, idx := range b.activeIDs {
+	candidates := make([]candidate, 0, len(b.uplinkActiveIDs))
+	for _, idx := range b.uplinkActiveIDs {
 		if excludeKey != "" && b.connections[idx].Key == excludeKey {
 			continue
 		}

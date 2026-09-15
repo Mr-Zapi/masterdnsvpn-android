@@ -128,11 +128,19 @@ type ClientConfig struct {
 	// continuously send empty poll requests (pings) that pull queued download
 	// packets from the server, keeping DownloadPumpConcurrency requests in
 	// flight per resolver. 0 resolvers = disabled.
-	DownloadPumpResolvers        int               `toml:"DOWNLOAD_PUMP_RESOLVERS"`
-	DownloadPumpResolversPercent int               `toml:"DOWNLOAD_PUMP_RESOLVERS_PERCENT"`
-	DownloadPumpConcurrency      int               `toml:"DOWNLOAD_PUMP_CONCURRENCY"`
-	Resolvers                    []ResolverAddress `toml:"-"`
-	ResolverMap                  map[string]int    `toml:"-"`
+	DownloadPumpResolvers        int `toml:"DOWNLOAD_PUMP_RESOLVERS"`
+	DownloadPumpResolversPercent int `toml:"DOWNLOAD_PUMP_RESOLVERS_PERCENT"`
+	DownloadPumpConcurrency      int `toml:"DOWNLOAD_PUMP_CONCURRENCY"`
+	// Directional resolver split (client-only, not negotiated): the share of the
+	// active resolver pool reserved for download pulling (DOWNLINK) versus normal
+	// upload/control traffic (UPLINK). Both are percentages and are normalized so
+	// they add up to 100. Setting DOWNLINK to 0 disables the split, so every
+	// resolver carries upload traffic and the download pump falls back to the
+	// legacy DOWNLOAD_PUMP_* selection.
+	UplinkResolversPercent   int               `toml:"UPLINK_RESOLVERS_PERCENT"`
+	DownlinkResolversPercent int               `toml:"DOWNLINK_RESOLVERS_PERCENT"`
+	Resolvers                []ResolverAddress `toml:"-"`
+	ResolverMap              map[string]int    `toml:"-"`
 }
 
 type ClientConfigOverrides struct {
@@ -238,6 +246,8 @@ func defaultClientConfig() ClientConfig {
 		DownloadPumpResolvers:                 0,
 		DownloadPumpResolversPercent:          0,
 		DownloadPumpConcurrency:               4,
+		UplinkResolversPercent:                75,
+		DownlinkResolversPercent:              25,
 	}
 }
 
@@ -439,6 +449,10 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.DownloadPumpResolvers = clampInt(cfg.DownloadPumpResolvers, 0, 16)
 	cfg.DownloadPumpResolversPercent = clampInt(cfg.DownloadPumpResolversPercent, 0, 100)
 	cfg.DownloadPumpConcurrency = clampInt(cfg.DownloadPumpConcurrency, 1, 64)
+	cfg.UplinkResolversPercent, cfg.DownlinkResolversPercent = normalizeDirectionalResolverPercent(
+		cfg.UplinkResolversPercent,
+		cfg.DownlinkResolversPercent,
+	)
 
 	if cfg.MinUploadMTU < 0 || cfg.MinDownloadMTU < 0 || cfg.MaxUploadMTU < 0 || cfg.MaxDownloadMTU < 0 {
 		return cfg, fmt.Errorf("mtu values cannot be negative")
@@ -1080,6 +1094,29 @@ func clampInt(value int, minValue int, maxValue int) int {
 	}
 
 	return value
+}
+
+// normalizeDirectionalResolverPercent returns an uplink/downlink percentage pair
+// that is clamped to [0,100] and adds up to 100. When both values are left at
+// their zero value the documented 75/25 default is used. Leaving only one side
+// unset derives it from the other, so (100, 0) cleanly disables the split.
+func normalizeDirectionalResolverPercent(uplink int, downlink int) (int, int) {
+	uplink = clampInt(uplink, 0, 100)
+	downlink = clampInt(downlink, 0, 100)
+
+	switch {
+	case uplink == 0 && downlink == 0:
+		return 75, 25
+	case downlink == 0:
+		return 100, 0
+	case uplink == 0:
+		return 100 - downlink, downlink
+	}
+
+	if sum := uplink + downlink; sum != 100 {
+		downlink = downlink * 100 / sum
+	}
+	return 100 - downlink, downlink
 }
 
 func defaultFloatAtMostZero(value float64, fallback float64) float64 {

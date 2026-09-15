@@ -58,7 +58,7 @@ func (c *Client) startDownloadPumps(ctx context.Context) {
 		return
 	}
 
-	if c.cfg.DownloadPumpResolvers <= 0 && c.cfg.DownloadPumpResolversPercent <= 0 {
+	if !c.downloadPumpEnabled() {
 		return
 	}
 	concurrency := c.cfg.DownloadPumpConcurrency
@@ -66,12 +66,7 @@ func (c *Client) startDownloadPumps(ctx context.Context) {
 		concurrency = 1
 	}
 
-	count := c.effectiveDownloadPumpResolvers(c.balancer.ActiveCount())
-	if count <= 0 {
-		return
-	}
-
-	conns := c.downloadPumpConnections(count, true)
+	conns := c.downloadPumpConnections(true)
 	if len(conns) == 0 {
 		return
 	}
@@ -92,6 +87,29 @@ func (c *Client) startDownloadPumps(ctx context.Context) {
 	}
 	c.asyncWG.Add(1)
 	go c.runDownloadPumpReporter(ctx)
+}
+
+// downloadPumpEnabled reports whether the pump should run. It is on when the
+// directional resolver split reserves any downlink share, or when the legacy
+// DOWNLOAD_PUMP_* settings are used.
+func (c *Client) downloadPumpEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.cfg.DownlinkResolversPercent > 0 ||
+		c.cfg.DownloadPumpResolvers > 0 ||
+		c.cfg.DownloadPumpResolversPercent > 0
+}
+
+// downloadPumpPool returns the candidate resolvers the pump may poll. When the
+// directional split is active this is exactly the downlink partition (disjoint
+// from the uplink resolvers used for uploads). Otherwise it falls back to the
+// whole active pool for the legacy top-N selection.
+func (c *Client) downloadPumpPool() []Connection {
+	if c == nil || c.balancer == nil {
+		return nil
+	}
+	return c.balancer.DownloadConnections()
 }
 
 // effectiveDownloadPumpResolvers returns how many resolvers to dedicate to
@@ -160,11 +178,12 @@ func (c *Client) runDownloadPumpReporter(ctx context.Context) {
 // pumps are polling.
 const downloadPumpSelectInterval = time.Second
 
-// downloadPumpConnections picks the best active resolvers for pumping: highest
-// download MTU first, then lowest resolve time. The result is cached briefly so
-// the selection follows MTU updates without re-sorting on every poll.
-func (c *Client) downloadPumpConnections(n int, forceRefresh bool) []Connection {
-	if c == nil || c.balancer == nil || n <= 0 {
+// downloadPumpConnections picks the best resolvers for pumping from the
+// downlink pool: highest download MTU first, then lowest resolve time. The
+// result is cached briefly so the selection follows MTU updates without
+// re-sorting on every poll.
+func (c *Client) downloadPumpConnections(forceRefresh bool) []Connection {
+	if c == nil || c.balancer == nil {
 		return nil
 	}
 
@@ -173,14 +192,11 @@ func (c *Client) downloadPumpConnections(n int, forceRefresh bool) []Connection 
 	if !forceRefresh && c.pumpSelect != nil && now.Sub(c.pumpSelectAt) < downloadPumpSelectInterval {
 		selected := c.pumpSelect
 		c.pumpSelectMu.Unlock()
-		if n > len(selected) {
-			n = len(selected)
-		}
-		return selected[:n]
+		return selected
 	}
 	c.pumpSelectMu.Unlock()
 
-	active := c.balancer.ActiveConnections()
+	active := c.downloadPumpPool()
 	if len(active) == 0 {
 		c.pumpSelectMu.Lock()
 		c.pumpSelect = nil
@@ -196,10 +212,18 @@ func (c *Client) downloadPumpConnections(n int, forceRefresh bool) []Connection 
 		return active[i].MTUResolveTime < active[j].MTUResolveTime
 	})
 
-	if n > len(active) {
-		n = len(active)
+	// Legacy path: cap to the configured N best resolvers after ranking. The
+	// directional split already defines the exact downlink pool size.
+	if c.cfg.DownlinkResolversPercent <= 0 {
+		n := c.effectiveDownloadPumpResolvers(len(active))
+		if n <= 0 {
+			active = nil
+		} else if n < len(active) {
+			active = active[:n]
+		}
 	}
-	selected := active[:n]
+
+	selected := active
 
 	c.pumpSelectMu.Lock()
 	c.pumpSelect = selected
@@ -209,13 +233,12 @@ func (c *Client) downloadPumpConnections(n int, forceRefresh bool) []Connection 
 }
 
 // downloadPumpConnectionAt returns the current slot-th best resolver, or false
-// when the active set is smaller than the number of pump slots.
+// when the downlink pool is smaller than the number of pump slots.
 func (c *Client) downloadPumpConnectionAt(slot int) (Connection, bool) {
 	if c == nil || c.balancer == nil {
 		return Connection{}, false
 	}
-	count := c.effectiveDownloadPumpResolvers(c.balancer.ActiveCount())
-	conns := c.downloadPumpConnections(count, false)
+	conns := c.downloadPumpConnections(false)
 	if slot < 0 || slot >= len(conns) {
 		return Connection{}, false
 	}

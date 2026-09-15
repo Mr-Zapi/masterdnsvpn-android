@@ -106,7 +106,7 @@ delegation works.
 
 ## 📱 Configure the app
 
-The app has two fields.
+The app has a few fields.
 
 ### Config (base64 JSON)
 
@@ -136,6 +136,22 @@ when the providers are unavailable. A **Default** list pre-filled with
 77.88.8.8:53
 77.88.8.1:53
 ```
+
+### Resolver split (uplink / downlink %)
+
+The active resolver pool is split into two **disjoint** sets:
+
+- **Uplink** resolvers carry upload and control traffic.
+- **Downlink** resolvers are polled by the download pump to pull data.
+
+Set the split with the **UPLINK %** and **DOWNLINK %** fields (defaults: `75` /
+`25`). The values are normalized to add up to 100. A resolver is never used for
+both directions. Downlink resolvers are chosen from the pool by highest download
+MTU. Set **DOWNLINK %** to `0` to disable the split and use the whole pool for
+upload (the pump then falls back to the legacy `DOWNLOAD_PUMP_*` behaviour).
+
+The same settings are available in the desktop/CLI config as
+`UPLINK_RESOLVERS_PERCENT` and `DOWNLINK_RESOLVERS_PERCENT`.
 
 Then tap **Connect**.
 

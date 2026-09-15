@@ -29,6 +29,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var configInput: EditText
     private lateinit var activeListText: TextView
     private lateinit var manageListsButton: Button
+    private lateinit var uplinkPercentInput: EditText
+    private lateinit var downlinkPercentInput: EditText
+    private lateinit var splitHintText: TextView
     private lateinit var powerButton: FrameLayout
     private lateinit var powerIcon: ImageView
     private lateinit var glow: android.view.View
@@ -79,6 +82,10 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val DEFAULT_RESOLVERS = "77.88.8.8:53\n77.88.8.1:53"
         private const val PREF_BATTERY_PROMPTED = "battery_opt_prompted"
+        private const val PREF_UPLINK_PERCENT = "uplink_percent"
+        private const val PREF_DOWNLINK_PERCENT = "downlink_percent"
+        private const val DEFAULT_UPLINK_PERCENT = 75
+        private const val DEFAULT_DOWNLINK_PERCENT = 25
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -94,6 +101,9 @@ class MainActivity : AppCompatActivity() {
         configInput = findViewById(R.id.configInput)
         activeListText = findViewById(R.id.activeListText)
         manageListsButton = findViewById(R.id.manageListsButton)
+        uplinkPercentInput = findViewById(R.id.uplinkPercentInput)
+        downlinkPercentInput = findViewById(R.id.downlinkPercentInput)
+        splitHintText = findViewById(R.id.splitHintText)
         powerButton = findViewById(R.id.powerButton)
         powerIcon = findViewById(R.id.powerIcon)
         glow = findViewById(R.id.glow)
@@ -102,6 +112,12 @@ class MainActivity : AppCompatActivity() {
         batteryText = findViewById(R.id.batteryText)
 
         configInput.setText(prefs.getString("config_b64", ""))
+
+        val up = prefs.getInt(PREF_UPLINK_PERCENT, DEFAULT_UPLINK_PERCENT)
+        val down = prefs.getInt(PREF_DOWNLINK_PERCENT, DEFAULT_DOWNLINK_PERCENT)
+        uplinkPercentInput.setText(up.toString())
+        downlinkPercentInput.setText(down.toString())
+        updateSplitHint(up, down)
 
         powerButton.setOnClickListener { onPowerTapped() }
         manageListsButton.setOnClickListener {
@@ -114,6 +130,8 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         updateActiveList()
         updateBatteryStatus()
+        val (up, down) = splitPercents()
+        updateSplitHint(up, down)
         ui.post(poller)
     }
 
@@ -230,17 +248,55 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun saveInputs() {
+        val (up, down) = splitPercents()
         prefs.edit()
             .putString("config_b64", configInput.text.toString().trim())
+            .putInt(PREF_UPLINK_PERCENT, up)
+            .putInt(PREF_DOWNLINK_PERCENT, down)
             .apply()
+        uplinkPercentInput.setText(up.toString())
+        downlinkPercentInput.setText(down.toString())
+        updateSplitHint(up, down)
+    }
+
+    /**
+     * Reads the uplink/downlink split, clamps both into 0..100 and normalizes
+     * them to add up to 100. A (0, 0) entry falls back to the 75/25 default.
+     */
+    private fun splitPercents(): Pair<Int, Int> {
+        var up = uplinkPercentInput.text.toString().trim().toIntOrNull() ?: DEFAULT_UPLINK_PERCENT
+        var down = downlinkPercentInput.text.toString().trim().toIntOrNull() ?: DEFAULT_DOWNLINK_PERCENT
+        up = up.coerceIn(0, 100)
+        down = down.coerceIn(0, 100)
+        when {
+            up == 0 && down == 0 -> {
+                up = DEFAULT_UPLINK_PERCENT
+                down = DEFAULT_DOWNLINK_PERCENT
+            }
+            down == 0 -> up = 100
+            up == 0 -> up = 100 - down
+            up + down != 100 -> {
+                down = down * 100 / (up + down)
+                up = 100 - down
+            }
+        }
+        return up to down
+    }
+
+    private fun updateSplitHint(up: Int, down: Int) {
+        if (!::splitHintText.isInitialized) return
+        splitHintText.text = "$up% upload / $down% download (disjoint pools)"
     }
 
     private fun startVpn() {
         val servers = store.serversText(store.active())
+        val (up, down) = splitPercents()
         val intent = Intent(this, MasterDnsVpnService::class.java)
         intent.action = MasterDnsVpnService.ACTION_CONNECT
         intent.putExtra(MasterDnsVpnService.EXTRA_CONFIG_B64, configInput.text.toString().trim())
         intent.putExtra(MasterDnsVpnService.EXTRA_RESOLVERS, servers)
+        intent.putExtra(MasterDnsVpnService.EXTRA_UPLINK_PERCENT, up)
+        intent.putExtra(MasterDnsVpnService.EXTRA_DOWNLINK_PERCENT, down)
         ContextCompat.startForegroundService(this, intent)
         refreshUi()
     }

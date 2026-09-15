@@ -226,6 +226,15 @@ DOWNLOAD_PUMP_RESOLVERS_PERCENT = 0
 DOWNLOAD_PUMP_RESOLVERS = 0
 DOWNLOAD_PUMP_CONCURRENCY = 4
 
+# Directional resolver split. The active resolver pool is partitioned into two
+# disjoint sets: UPLINK resolvers carry upload/control traffic, DOWNLINK
+# resolvers are polled by the download pump. Values are percentages and are
+# normalized to add up to 100. The defaults reserve 25% of the pool for
+# downloads and 75% for uploads. Set DOWNLINK to 0 to disable the split (every
+# resolver is uplink and the pump falls back to DOWNLOAD_PUMP_*).
+UPLINK_RESOLVERS_PERCENT = 75
+DOWNLINK_RESOLVERS_PERCENT = 25
+
 # Export successful MTU-tested resolvers to a file.
 SAVE_MTU_SERVERS_TO_FILE = false
 
