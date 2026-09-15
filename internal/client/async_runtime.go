@@ -975,6 +975,12 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 	// 2. Notify activity monitor (PingManager)
 	c.NotifyPacket(vpnPacket.PacketType, true)
 
+	// Track real download activity so the downlink pump stays aggressive while
+	// data is flowing, even when it arrives on uplink ACK responses.
+	if vpnPacket.PacketType == Enums.PACKET_STREAM_DATA || vpnPacket.PacketType == Enums.PACKET_STREAM_RESEND {
+		c.lastInboundDataUnix.Store(time.Now().UnixNano())
+	}
+
 	// 3. Queue deterministic non-data ACKs before any handler logic runs.
 	if handled := c.preprocessInboundPacket(vpnPacket); handled {
 		return

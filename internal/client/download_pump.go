@@ -503,6 +503,7 @@ func (p *downlinkPump) maintenance(ctx context.Context) {
 
 func (p *downlinkPump) maintain(now time.Time) {
 	base := p.client.downloadPumpTarget()
+	downloadActive := p.client.hasRecentInboundData(downloadPumpResponseTimeout)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -516,6 +517,16 @@ func (p *downlinkPump) maintain(now time.Time) {
 				p.inflightTotal = 0
 			}
 			state.inflight = 0
+		}
+
+		// While a download is actually flowing (data seen from any resolver,
+		// including the ACK-clocked path), keep the pump aggressive so it adds
+		// extra pulls on top of the ACK flow.
+		if downloadActive {
+			if state.target < downloadPumpMaxInFlightPerResolver {
+				state.target++
+			}
+			continue
 		}
 
 		// Adapt on real download delivery, not on bare PONGs: ramping while
@@ -543,6 +554,19 @@ func (p *downlinkPump) maintain(now time.Time) {
 			}
 		}
 	}
+}
+
+// hasRecentInboundData reports whether a stream data packet arrived within the
+// given window.
+func (c *Client) hasRecentInboundData(window time.Duration) bool {
+	if c == nil || window <= 0 {
+		return false
+	}
+	last := c.lastInboundDataUnix.Load()
+	if last == 0 {
+		return false
+	}
+	return time.Now().UnixNano()-last <= window.Nanoseconds()
 }
 
 // runDownloadPumpReporter logs rolling 5s pump counters so it is obvious whether

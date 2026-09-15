@@ -15,6 +15,31 @@ func mtuOutlierConnections() []Connection {
 	}
 }
 
+func TestSelectMTUScanConnectionsSpreadsSample(t *testing.T) {
+	cfg := config.ClientConfig{MTUTestMaxResolvers: 4, RX_TX_Workers: 4}
+	c := buildTestClientWithResolvers(cfg, "a", "b", "c", "d", "e", "f", "g", "h", "i", "j")
+
+	all := c.balancer.AllConnections()
+	sample := c.selectMTUScanConnections(all)
+	if len(sample) != 4 {
+		t.Fatalf("expected a 4-resolver sample, got %d", len(sample))
+	}
+
+	seen := make(map[string]struct{}, len(sample))
+	for _, conn := range sample {
+		if _, ok := seen[conn.Key]; ok {
+			t.Fatalf("sample contains duplicate resolver %q", conn.Key)
+		}
+		seen[conn.Key] = struct{}{}
+	}
+
+	// Unlimited returns the whole pool.
+	c.cfg.MTUTestMaxResolvers = 0
+	if got := len(c.selectMTUScanConnections(all)); got != len(all) {
+		t.Fatalf("expected the full pool when unlimited, got %d", got)
+	}
+}
+
 func TestOptimizeMTUResolversDefaultKeepsLowOutlier(t *testing.T) {
 	cfg := config.ClientConfig{
 		AutoRemoveLowMTUServers: true,

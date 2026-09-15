@@ -90,6 +90,17 @@ func mobileSpeedOverrides() map[string]any {
 		"BaseEncodeData": false,
 		// Discover resolvers on more parallel probes (faster startup only).
 		"MTUTestParallelism": 32,
+		// Bound the MTU scan of a huge scanned list to a spread sample; the
+		// health loop validates the rest against the session MTU later.
+		"MTUTestMaxResolvers": 128,
+		// Drop low-MTU outliers so one weak resolver does not cap the tunnel.
+		"MTUOptimizerAggressive": true,
+		// Ask for faster loss recovery while keeping the retry pace sane.
+		"ARQDataNackInitialDelaySeconds": 0.05,
+		"ARQDataNackRepeatSeconds":       0.4,
+		// Compress compressible payloads (falls back to raw when it would grow).
+		"UploadCompressionType":   2,
+		"DownloadCompressionType": 2,
 		// Dedicated download pullers: keep extra empty poll requests in flight
 		// on a dedicated share of the resolver pool so the server returns more
 		// download fragments per RTT than the ACK-clocked flow alone. The pool

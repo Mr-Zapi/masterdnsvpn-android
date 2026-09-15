@@ -166,10 +166,10 @@ func (c *Client) optimizeMTUResolvers(connections []Connection) ([]Connection, i
 	}
 
 	if c.cfg.MTUOptimizerAggressive {
-		// Tighter tolerance: a resolver within ~10% of the p75 is kept, an
+		// Tighter tolerance: a resolver within ~15% of the p75 is kept, an
 		// outlier below it is dropped if the resulting MTU gain is worthwhile.
-		if toleranceRatio < 0.90 {
-			toleranceRatio = 0.90
+		if toleranceRatio < 0.85 {
+			toleranceRatio = 0.85
 		}
 		if minGainUp > 24 {
 			minGainUp = 24
@@ -359,6 +359,10 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	if len(scanConnections) == 0 {
 		return ErrNoValidConnections
 	}
+	if sampled := c.selectMTUScanConnections(scanConnections); len(sampled) < len(scanConnections) {
+		c.deactivateUnscannedResolvers(scanConnections, sampled)
+		scanConnections = sampled
+	}
 
 	workerCount := min(max(1, c.cfg.EffectiveMTUTestParallelism()), len(scanConnections))
 	c.logMTUStart(workerCount)
@@ -380,6 +384,52 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	c.appendMTUUsageSeparatorOnce()
 	c.logMTUCompletion(validConns)
 	return nil
+}
+
+// selectMTUScanConnections bounds the MTU scan to a spread sample of the
+// resolver pool when MTU_TEST_MAX_RESOLVERS is set. The sample strides across
+// the (IP-sorted) list so it does not bias toward a single subnet.
+func (c *Client) selectMTUScanConnections(conns []Connection) []Connection {
+	maxScan := 0
+	if c != nil {
+		maxScan = c.cfg.MTUTestMaxResolvers
+	}
+	if maxScan <= 0 || len(conns) <= maxScan {
+		return conns
+	}
+
+	sampled := make([]Connection, 0, maxScan)
+	step := float64(len(conns)) / float64(maxScan)
+	for i := 0; i < maxScan; i++ {
+		idx := int(float64(i) * step)
+		if idx >= len(conns) {
+			idx = len(conns) - 1
+		}
+		sampled = append(sampled, conns[idx])
+	}
+	return sampled
+}
+
+// deactivateUnscannedResolvers marks every resolver that was not part of the
+// bounded scan inactive, so it cannot drag the session MTU before the resolver
+// health loop validates it against the (higher) session MTU.
+func (c *Client) deactivateUnscannedResolvers(all []Connection, scanned []Connection) {
+	if c == nil || c.balancer == nil || len(scanned) >= len(all) {
+		return
+	}
+	scannedKeys := make(map[string]struct{}, len(scanned))
+	for _, conn := range scanned {
+		scannedKeys[conn.Key] = struct{}{}
+	}
+	for _, conn := range all {
+		if conn.Key == "" {
+			continue
+		}
+		if _, ok := scannedKeys[conn.Key]; ok {
+			continue
+		}
+		c.balancer.SetConnectionValidity(conn.Key, false)
+	}
 }
 
 // probeAllConnectionsMTU runs the per-resolver MTU probes with bounded
@@ -594,6 +644,10 @@ func (c *Client) runBackgroundMTUDiscovery(ctx context.Context) {
 	conns := c.balancer.AllConnections()
 	if len(conns) == 0 {
 		return
+	}
+	if sampled := c.selectMTUScanConnections(conns); len(sampled) < len(conns) {
+		c.deactivateUnscannedResolvers(conns, sampled)
+		conns = sampled
 	}
 	if c.log != nil {
 		c.log.Infof("\U0001F50D <cyan>MTU: background discovery started</cyan>")

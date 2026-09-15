@@ -180,6 +180,40 @@ func TestDownlinkPumpMaintainDecaysToSingleIdlePoll(t *testing.T) {
 	}
 }
 
+func TestDownlinkPumpRampsWhileInboundDataFlowing(t *testing.T) {
+	pump, c := newTestDownlinkPump(t, 25)
+
+	pump.mu.Lock()
+	var state *downlinkPumpState
+	for _, s := range pump.states {
+		state = s
+	}
+	state.target = 2
+	pump.mu.Unlock()
+
+	c.lastInboundDataUnix.Store(time.Now().UnixNano())
+	pump.maintain(time.Now())
+
+	pump.mu.Lock()
+	target := state.target
+	pump.mu.Unlock()
+	if target != 3 {
+		t.Fatalf("expected target to ramp while data flows, got %d", target)
+	}
+}
+
+func TestHasRecentInboundData(t *testing.T) {
+	_, c := newTestDownlinkPump(t, 25)
+
+	if c.hasRecentInboundData(time.Second) {
+		t.Fatal("expected no recent inbound data initially")
+	}
+	c.lastInboundDataUnix.Store(time.Now().UnixNano())
+	if !c.hasRecentInboundData(time.Second) {
+		t.Fatal("expected recent inbound data to be reported")
+	}
+}
+
 func TestDownlinkPumpGlobalInFlightCap(t *testing.T) {
 	pump, _ := newTestDownlinkPump(t, 25)
 
