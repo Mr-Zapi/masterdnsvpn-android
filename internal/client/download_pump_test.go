@@ -180,37 +180,18 @@ func TestDownlinkPumpMaintainDecaysToSingleIdlePoll(t *testing.T) {
 	}
 }
 
-func TestDownlinkPumpRampsWhileInboundDataFlowing(t *testing.T) {
-	pump, c := newTestDownlinkPump(t, 25)
+func TestWriterQueueHasPumpHeadroom(t *testing.T) {
+	c := &Client{}
+	c.encodedTXChannel = make(chan writerTask, 100)
 
-	pump.mu.Lock()
-	var state *downlinkPumpState
-	for _, s := range pump.states {
-		state = s
+	if !c.writerQueueHasPumpHeadroom() {
+		t.Fatal("expected headroom on an empty writer queue")
 	}
-	state.target = 2
-	pump.mu.Unlock()
-
-	c.lastInboundDataUnix.Store(time.Now().UnixNano())
-	pump.maintain(time.Now())
-
-	pump.mu.Lock()
-	target := state.target
-	pump.mu.Unlock()
-	if target != 3 {
-		t.Fatalf("expected target to ramp while data flows, got %d", target)
+	for i := 0; i < 80; i++ {
+		c.encodedTXChannel <- writerTask{}
 	}
-}
-
-func TestHasRecentInboundData(t *testing.T) {
-	_, c := newTestDownlinkPump(t, 25)
-
-	if c.hasRecentInboundData(time.Second) {
-		t.Fatal("expected no recent inbound data initially")
-	}
-	c.lastInboundDataUnix.Store(time.Now().UnixNano())
-	if !c.hasRecentInboundData(time.Second) {
-		t.Fatal("expected recent inbound data to be reported")
+	if c.writerQueueHasPumpHeadroom() {
+		t.Fatal("expected no pump headroom when the writer queue is mostly full")
 	}
 }
 

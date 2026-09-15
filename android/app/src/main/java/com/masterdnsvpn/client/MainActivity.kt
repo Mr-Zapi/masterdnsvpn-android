@@ -31,6 +31,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var manageListsButton: Button
     private lateinit var uplinkPercentInput: EditText
     private lateinit var downlinkPercentInput: EditText
+    private lateinit var resolverPoolSizeInput: EditText
     private lateinit var splitHintText: TextView
     private lateinit var powerButton: FrameLayout
     private lateinit var powerIcon: ImageView
@@ -84,8 +85,10 @@ class MainActivity : AppCompatActivity() {
         private const val PREF_BATTERY_PROMPTED = "battery_opt_prompted"
         private const val PREF_UPLINK_PERCENT = "uplink_percent"
         private const val PREF_DOWNLINK_PERCENT = "downlink_percent"
+        private const val PREF_RESOLVER_POOL_SIZE = "resolver_pool_size"
         private const val DEFAULT_UPLINK_PERCENT = 75
         private const val DEFAULT_DOWNLINK_PERCENT = 25
+        private const val DEFAULT_RESOLVER_POOL_SIZE = 32
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -103,6 +106,7 @@ class MainActivity : AppCompatActivity() {
         manageListsButton = findViewById(R.id.manageListsButton)
         uplinkPercentInput = findViewById(R.id.uplinkPercentInput)
         downlinkPercentInput = findViewById(R.id.downlinkPercentInput)
+        resolverPoolSizeInput = findViewById(R.id.resolverPoolSizeInput)
         splitHintText = findViewById(R.id.splitHintText)
         powerButton = findViewById(R.id.powerButton)
         powerIcon = findViewById(R.id.powerIcon)
@@ -118,6 +122,9 @@ class MainActivity : AppCompatActivity() {
         uplinkPercentInput.setText(up.toString())
         downlinkPercentInput.setText(down.toString())
         updateSplitHint(up, down)
+
+        val poolSize = prefs.getInt(PREF_RESOLVER_POOL_SIZE, DEFAULT_RESOLVER_POOL_SIZE)
+        resolverPoolSizeInput.setText(poolSize.toString())
 
         powerButton.setOnClickListener { onPowerTapped() }
         manageListsButton.setOnClickListener {
@@ -249,14 +256,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveInputs() {
         val (up, down) = splitPercents()
+        val poolSize = resolverPoolSize()
         prefs.edit()
             .putString("config_b64", configInput.text.toString().trim())
             .putInt(PREF_UPLINK_PERCENT, up)
             .putInt(PREF_DOWNLINK_PERCENT, down)
+            .putInt(PREF_RESOLVER_POOL_SIZE, poolSize)
             .apply()
         uplinkPercentInput.setText(up.toString())
         downlinkPercentInput.setText(down.toString())
+        resolverPoolSizeInput.setText(poolSize.toString())
         updateSplitHint(up, down)
+    }
+
+    /** Maximum active resolvers; 0 means no limit. */
+    private fun resolverPoolSize(): Int {
+        return (resolverPoolSizeInput.text.toString().trim().toIntOrNull() ?: DEFAULT_RESOLVER_POOL_SIZE)
+            .coerceIn(0, 9999)
     }
 
     /**
@@ -291,12 +307,14 @@ class MainActivity : AppCompatActivity() {
     private fun startVpn() {
         val servers = store.serversText(store.active())
         val (up, down) = splitPercents()
+        val poolSize = resolverPoolSize()
         val intent = Intent(this, MasterDnsVpnService::class.java)
         intent.action = MasterDnsVpnService.ACTION_CONNECT
         intent.putExtra(MasterDnsVpnService.EXTRA_CONFIG_B64, configInput.text.toString().trim())
         intent.putExtra(MasterDnsVpnService.EXTRA_RESOLVERS, servers)
         intent.putExtra(MasterDnsVpnService.EXTRA_UPLINK_PERCENT, up)
         intent.putExtra(MasterDnsVpnService.EXTRA_DOWNLINK_PERCENT, down)
+        intent.putExtra(MasterDnsVpnService.EXTRA_RESOLVER_POOL_SIZE, poolSize)
         ContextCompat.startForegroundService(this, intent)
         refreshUi()
     }

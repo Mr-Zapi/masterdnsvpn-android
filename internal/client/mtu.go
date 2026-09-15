@@ -100,6 +100,89 @@ type mtuDecision struct {
 }
 
 func (c *Client) optimizeMTUResolvers(connections []Connection) ([]Connection, int, int, int) {
+	valid, up, down, chars := c.optimizeMTUResolversInner(connections)
+	return c.capResolverPool(valid, up, down, chars)
+}
+
+// capResolverPool keeps at most RESOLVER_POOL_SIZE resolvers active, choosing
+// the ones with the best download/upload MTU and, as a tie-break, the best live
+// loss/latency. 0 disables the cap. The session MTU is recomputed over the
+// kept resolvers.
+func (c *Client) capResolverPool(valid []Connection, up int, down int, chars int) ([]Connection, int, int, int) {
+	if c == nil || c.cfg.ResolverPoolSize <= 0 || len(valid) <= c.cfg.ResolverPoolSize {
+		return valid, up, down, chars
+	}
+
+	ranked := make([]Connection, len(valid))
+	copy(ranked, valid)
+	ranked = c.rankResolversByQuality(ranked)
+
+	kept := ranked[:c.cfg.ResolverPoolSize]
+	keptKeys := make(map[string]struct{}, len(kept))
+	for _, conn := range kept {
+		keptKeys[conn.Key] = struct{}{}
+	}
+	for _, conn := range valid {
+		if conn.Key == "" {
+			continue
+		}
+		if _, ok := keptKeys[conn.Key]; ok {
+			continue
+		}
+		c.balancer.SetConnectionValidity(conn.Key, false)
+	}
+
+	validConns, minUpload, minDownload, minUploadChars := summarizeValidMTUConnections(kept)
+	return validConns, minUpload, minDownload, minUploadChars
+}
+
+// rankResolversByQuality orders resolvers by download MTU, then upload MTU,
+// then live loss and RTT, so the pool cap keeps the resolvers that can carry
+// the largest fragments over the fastest paths.
+func (c *Client) rankResolversByQuality(conns []Connection) []Connection {
+	type scored struct {
+		conn Connection
+		loss uint64
+		rtt  uint64
+		has  bool
+	}
+	items := make([]scored, len(conns))
+	for i, conn := range conns {
+		loss, rtt, ok := c.balancer.ResolverQuality(conn.Key)
+		items[i] = scored{conn: conn, loss: loss, rtt: rtt, has: ok}
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if a.conn.DownloadMTUBytes != b.conn.DownloadMTUBytes {
+			return a.conn.DownloadMTUBytes > b.conn.DownloadMTUBytes
+		}
+		if a.conn.UploadMTUBytes != b.conn.UploadMTUBytes {
+			return a.conn.UploadMTUBytes > b.conn.UploadMTUBytes
+		}
+		// Prefer resolvers with measured quality over unmeasured ones.
+		if a.has != b.has {
+			return a.has
+		}
+		if a.has && b.has {
+			if a.loss != b.loss {
+				return a.loss < b.loss
+			}
+			if a.rtt != b.rtt {
+				return a.rtt < b.rtt
+			}
+		}
+		return false
+	})
+
+	out := make([]Connection, len(items))
+	for i := range items {
+		out[i] = items[i].conn
+	}
+	return out
+}
+
+func (c *Client) optimizeMTUResolversInner(connections []Connection) ([]Connection, int, int, int) {
 	if !c.cfg.AutoRemoveLowMTUServers {
 		return summarizeValidMTUConnections(connections)
 	}
@@ -393,6 +476,13 @@ func (c *Client) selectMTUScanConnections(conns []Connection) []Connection {
 	maxScan := 0
 	if c != nil {
 		maxScan = c.cfg.MTUTestMaxResolvers
+		// When a scan cap is set, always scan at least as many resolvers as the
+		// pool wants to keep.
+		if maxScan > 0 {
+			if pool := c.cfg.ResolverPoolSize; pool > maxScan {
+				maxScan = pool
+			}
+		}
 	}
 	if maxScan <= 0 || len(conns) <= maxScan {
 		return conns
@@ -668,9 +758,55 @@ func (c *Client) runBackgroundMTUDiscovery(ctx context.Context) {
 	}
 }
 
+// runResolverPoolCurator periodically enforces RESOLVER_POOL_SIZE, keeping the
+// best resolvers by MTU and live loss/latency as the health loop re-admits
+// additional resolvers over time.
+func (c *Client) runResolverPoolCurator(ctx context.Context) {
+	ticker := time.NewTicker(resolverPoolCuratorInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.enforceResolverPoolCap()
+		}
+	}
+}
+
+const resolverPoolCuratorInterval = 10 * time.Second
+
+func (c *Client) enforceResolverPoolCap() {
+	if c == nil || c.balancer == nil {
+		return
+	}
+	limit := c.cfg.ResolverPoolSize
+	if limit <= 0 {
+		return
+	}
+
+	active := c.balancer.ActiveConnections()
+	if len(active) <= limit {
+		return
+	}
+
+	ranked := c.rankResolversByQuality(active)
+	for _, conn := range ranked[limit:] {
+		if conn.Key == "" {
+			continue
+		}
+		c.balancer.SetConnectionValidity(conn.Key, false)
+	}
+}
+
 func (c *Client) runResolverHealthLoop(ctx context.Context) {
 	if c == nil || c.balancer == nil {
 		return
+	}
+
+	if c.cfg.ResolverPoolSize > 0 {
+		go c.runResolverPoolCurator(ctx)
 	}
 
 	recheckInterval := c.resolverHealthRecheckInterval()

@@ -76,6 +76,10 @@ type ClientConfig struct {
 	// resolvers are validated later by the resolver health loop against the
 	// session MTU, so a huge scanned list does not stall startup.
 	MTUTestMaxResolvers int `toml:"MTU_TEST_MAX_RESOLVERS"`
+	// ResolverPoolSize caps how many resolvers stay active at once, keeping the
+	// ones with the best MTU/latency. 0 = keep every valid resolver. This lets
+	// the user trade resolver count against session MTU.
+	ResolverPoolSize int `toml:"RESOLVER_POOL_SIZE"`
 	// MTUSearchTolerance stops the MTU binary search once the remaining range
 	// is this small, trading a few bytes of MTU for far fewer timed-out
 	// overshoot probes (the main startup cost).
@@ -205,6 +209,7 @@ func defaultClientConfig() ClientConfig {
 		MTUTestTimeout:                        2.0,
 		MTUTestParallelism:                    16,
 		MTUTestMaxResolvers:                   0,
+		ResolverPoolSize:                      0,
 		MTUSearchTolerance:                    32,
 		MTUBackgroundDiscovery:                true,
 		MTUCacheTTLSeconds:                    86400.0,
@@ -482,6 +487,7 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUTestTimeout = defaultFloatAtMostZero(cfg.MTUTestTimeout, 2.0)
 	cfg.MTUTestParallelism = defaultIntBelow(cfg.MTUTestParallelism, 1, 1)
 	cfg.MTUTestMaxResolvers = clampInt(cfg.MTUTestMaxResolvers, 0, 65536)
+	cfg.ResolverPoolSize = clampInt(cfg.ResolverPoolSize, 0, 65536)
 	cfg.MTUSearchTolerance = clampInt(defaultIntBelow(cfg.MTUSearchTolerance, 1, 32), 1, 512)
 	cfg.MTUCacheTTLSeconds = clampFloat(defaultFloatAtMostZero(cfg.MTUCacheTTLSeconds, 86400.0), 0.0, 2592000.0)
 	legacyRX_TX_Workers := max(cfg.LegacyTunnelReaderWorkers, cfg.LegacyTunnelWriterWorkers)

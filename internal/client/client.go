@@ -70,11 +70,6 @@ type Client struct {
 	// RX path (noteResponse) and replaced on each runtime start.
 	downlinkPump atomic.Pointer[downlinkPump]
 
-	// lastInboundDataUnix is the last time a STREAM_DATA/STREAM_RESEND packet
-	// arrived, used to keep the download pump aggressive while a download is
-	// actually in flight regardless of which resolver carried the data.
-	lastInboundDataUnix atomic.Int64
-
 	successMTUChecks  bool
 	udpBufferPool     sync.Pool
 	resolverConnsMu   sync.Mutex

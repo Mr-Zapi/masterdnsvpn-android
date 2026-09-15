@@ -40,6 +40,47 @@ func TestSelectMTUScanConnectionsSpreadsSample(t *testing.T) {
 	}
 }
 
+func TestCapResolverPoolKeepsBestMTU(t *testing.T) {
+	cfg := config.ClientConfig{ResolverPoolSize: 2, RX_TX_Workers: 4}
+	c := buildTestClientWithResolvers(cfg, "a", "b", "c", "d")
+
+	valid := []Connection{
+		{Key: "a", IsValid: true, UploadMTUBytes: 122, DownloadMTUBytes: 1024},
+		{Key: "b", IsValid: true, UploadMTUBytes: 122, DownloadMTUBytes: 3592},
+		{Key: "c", IsValid: true, UploadMTUBytes: 122, DownloadMTUBytes: 2536},
+		{Key: "d", IsValid: true, UploadMTUBytes: 122, DownloadMTUBytes: 3400},
+	}
+
+	kept, _, down, _ := c.capResolverPool(valid, 122, 1024, 0)
+	if len(kept) != 2 {
+		t.Fatalf("expected pool capped to 2, got %d", len(kept))
+	}
+	if down != 3400 {
+		t.Fatalf("expected session download MTU 3400 over the best 2, got %d", down)
+	}
+	keptKeys := map[string]bool{}
+	for _, conn := range kept {
+		keptKeys[conn.Key] = true
+	}
+	if !keptKeys["b"] || !keptKeys["d"] {
+		t.Fatalf("expected the two highest-MTU resolvers b and d, got %+v", keptKeys)
+	}
+}
+
+func TestCapResolverPoolDisabledKeepsAll(t *testing.T) {
+	cfg := config.ClientConfig{ResolverPoolSize: 0, RX_TX_Workers: 4}
+	c := buildTestClientWithResolvers(cfg, "a", "b", "c", "d")
+
+	valid := []Connection{
+		{Key: "a", IsValid: true, UploadMTUBytes: 122, DownloadMTUBytes: 1024},
+		{Key: "b", IsValid: true, UploadMTUBytes: 122, DownloadMTUBytes: 3592},
+	}
+	kept, _, _, _ := c.capResolverPool(valid, 122, 1024, 0)
+	if len(kept) != 2 {
+		t.Fatalf("expected no cap when disabled, got %d", len(kept))
+	}
+}
+
 func TestOptimizeMTUResolversDefaultKeepsLowOutlier(t *testing.T) {
 	cfg := config.ClientConfig{
 		AutoRemoveLowMTUServers: true,

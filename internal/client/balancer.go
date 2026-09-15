@@ -1037,6 +1037,35 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 	return selected, nil
 }
 
+// ResolverQuality returns a loss score (per-mille, lower is better) and the
+// average RTT in microseconds for a resolver. ok is false until enough samples
+// have been collected.
+func (b *Balancer) ResolverQuality(serverKey string) (loss uint64, rttMicros uint64, ok bool) {
+	if b == nil {
+		return 0, 0, false
+	}
+	b.mu.RLock()
+	idx, exists := b.indexByKey[serverKey]
+	if !exists || idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
+		b.mu.RUnlock()
+		return 0, 0, false
+	}
+	stats := b.stats[idx]
+	b.mu.RUnlock()
+
+	sent, _, lost, sum, count := stats.snapshot()
+	if sent < 5 {
+		return 0, 0, false
+	}
+	if sent > 0 {
+		loss = lost * 1000 / sent
+	}
+	if count > 0 {
+		rttMicros = sum / count
+	}
+	return loss, rttMicros, true
+}
+
 func (b *Balancer) AverageRTT(serverKey string) (time.Duration, bool) {
 	stats := b.statsForKey(serverKey)
 	if stats == nil {

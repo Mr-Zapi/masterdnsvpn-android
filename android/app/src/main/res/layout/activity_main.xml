@@ -226,6 +226,30 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="18dp"
+                android:text="RESOLVERS (MAX ACTIVE)"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp"
+                android:letterSpacing="0.14"
+                android:fontFamily="sans-serif-medium" />
+
+            <EditText
+                android:id="@+id/resolverPoolSizeInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_input"
+                android:padding="14dp"
+                android:hint="32 (0 = no limit)"
+                android:textColorHint="@color/text_secondary"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp"
+                android:inputType="number"
+                android:maxLength="4" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
                 android:text="BATTERY"
                 android:textColor="@color/text_secondary"
                 android:textSize="11sp"

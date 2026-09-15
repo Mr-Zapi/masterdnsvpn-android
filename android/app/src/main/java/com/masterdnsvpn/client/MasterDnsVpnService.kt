@@ -35,11 +35,14 @@ class MasterDnsVpnService : VpnService() {
         const val EXTRA_RESOLVERS = "resolvers"
         const val EXTRA_UPLINK_PERCENT = "uplink_percent"
         const val EXTRA_DOWNLINK_PERCENT = "downlink_percent"
+        const val EXTRA_RESOLVER_POOL_SIZE = "resolver_pool_size"
 
         // Default directional split: 75% of resolvers carry upload/control
         // traffic, 25% are reserved for download pulling.
         const val DEFAULT_UPLINK_PERCENT = 75
         const val DEFAULT_DOWNLINK_PERCENT = 25
+        // Default cap on active resolvers (0 = no cap).
+        const val DEFAULT_RESOLVER_POOL_SIZE = 32
 
         private const val TAG = "MasterDnsVPN"
         private const val MTU = 1500
@@ -55,6 +58,7 @@ class MasterDnsVpnService : VpnService() {
         private const val PREF_RESOLVERS = "vpn_resolvers"
         private const val PREF_UPLINK_PERCENT = "vpn_uplink_percent"
         private const val PREF_DOWNLINK_PERCENT = "vpn_downlink_percent"
+        private const val PREF_RESOLVER_POOL_SIZE = "vpn_resolver_pool_size"
 
         // DNS servers used to resolve names DIRECTLY (over a VPN-protected
         // socket), bypassing the DNS tunnel. Yandex DNS stays reachable in
@@ -115,8 +119,10 @@ class MasterDnsVpnService : VpnService() {
 
         val uplinkDefault = prefs().getInt(PREF_UPLINK_PERCENT, DEFAULT_UPLINK_PERCENT)
         val downlinkDefault = prefs().getInt(PREF_DOWNLINK_PERCENT, DEFAULT_DOWNLINK_PERCENT)
+        val poolDefault = prefs().getInt(PREF_RESOLVER_POOL_SIZE, DEFAULT_RESOLVER_POOL_SIZE)
         val uplinkPercent = intent?.getIntExtra(EXTRA_UPLINK_PERCENT, uplinkDefault) ?: uplinkDefault
         val downlinkPercent = intent?.getIntExtra(EXTRA_DOWNLINK_PERCENT, downlinkDefault) ?: downlinkDefault
+        val resolverPoolSize = intent?.getIntExtra(EXTRA_RESOLVER_POOL_SIZE, poolDefault) ?: poolDefault
 
         if (configB64.isBlank() || resolvers.isBlank()) {
             Log.e(TAG, "missing config or resolvers; cannot start")
@@ -125,13 +131,13 @@ class MasterDnsVpnService : VpnService() {
             return START_NOT_STICKY
         }
 
-        startTunnel(configB64, resolvers, uplinkPercent, downlinkPercent)
+        startTunnel(configB64, resolvers, uplinkPercent, downlinkPercent, resolverPoolSize)
         // Redeliver the CONNECT intent if the process is killed, so the tunnel
         // comes back up automatically instead of dying silently.
         return START_REDELIVER_INTENT
     }
 
-    private fun startTunnel(configB64: String, resolvers: String, uplinkPercent: Int, downlinkPercent: Int) {
+    private fun startTunnel(configB64: String, resolvers: String, uplinkPercent: Int, downlinkPercent: Int, resolverPoolSize: Int) {
         stopping = false
         clearLastError()
         if (Mobile.isRunning()) {
@@ -145,6 +151,7 @@ class MasterDnsVpnService : VpnService() {
             .putString(PREF_RESOLVERS, resolvers)
             .putInt(PREF_UPLINK_PERCENT, uplinkPercent)
             .putInt(PREF_DOWNLINK_PERCENT, downlinkPercent)
+            .putInt(PREF_RESOLVER_POOL_SIZE, resolverPoolSize)
             .apply()
 
         acquireWakeLock()
@@ -201,6 +208,7 @@ class MasterDnsVpnService : VpnService() {
                     DIRECT_DNS,
                     uplinkPercent.toLong(),
                     downlinkPercent.toLong(),
+                    resolverPoolSize.toLong(),
                     filesDir.absolutePath,
                     // Protector: make direct-DNS sockets bypass the VPN so they
                     // don't loop back into tun2socks.

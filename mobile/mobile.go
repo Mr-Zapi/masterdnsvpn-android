@@ -197,13 +197,16 @@ func parseDNSServers(raw string) []string {
 //	downlinkPercent: share (0..100) of active resolvers reserved for download
 //	                pulling. Negative means "use the config/default". The two
 //	                pools are disjoint (a resolver is never in both).
+//	resolverPoolSize: maximum number of resolvers kept active, chosen by best
+//	                MTU and live loss/latency. Negative means "use the
+//	                config/default"; 0 means no cap.
 //	filesDir      : a writable directory (Context.getFilesDir().getAbsolutePath())
 //	protector     : Android VpnService protector (may be nil); required for
 //	                directDNS so the queries bypass the tunnel.
 //
 // It returns nil on success. On failure everything is torn down and a non-nil
 // error is returned.
-func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText string, directDNS string, uplinkPercent int, downlinkPercent int, filesDir string, protector Protector) error {
+func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText string, directDNS string, uplinkPercent int, downlinkPercent int, resolverPoolSize int, filesDir string, protector Protector) error {
 	mu.Lock()
 	if running.Load() || starting {
 		mu.Unlock()
@@ -263,6 +266,9 @@ func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText st
 	if uplinkPercent >= 0 && downlinkPercent >= 0 {
 		overrides.Values["UplinkResolversPercent"] = uplinkPercent
 		overrides.Values["DownlinkResolversPercent"] = downlinkPercent
+	}
+	if resolverPoolSize >= 0 {
+		overrides.Values["ResolverPoolSize"] = resolverPoolSize
 	}
 
 	cfg, err := config.LoadClientConfigFromJSONBase64WithOverrides(configB64, overrides)
