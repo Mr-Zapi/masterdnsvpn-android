@@ -81,6 +81,45 @@ func TestCapResolverPoolDisabledKeepsAll(t *testing.T) {
 	}
 }
 
+func TestOptimizeMTUResolversPoolCapBoundsDrops(t *testing.T) {
+	cfg := config.ClientConfig{
+		AutoRemoveLowMTUServers: true,
+		MTUOptimizerAggressive:  true,
+		ResolverPoolSize:        3,
+		RX_TX_Workers:           4,
+	}
+	c := buildTestClientWithResolvers(cfg, "a", "b", "c", "d")
+
+	// The inner optimizer may drop outliers, but never below the pool size.
+	valid, _, down, _ := c.optimizeMTUResolversInner(mtuOutlierConnections())
+	if len(valid) != 3 {
+		t.Fatalf("expected the inner optimizer to keep the pool floor of 3, got %d", len(valid))
+	}
+	if down != 3592 {
+		t.Fatalf("expected the low outlier dropped, session MTU 3592, got %d", down)
+	}
+}
+
+func TestOptimizeMTUResolversSmallPoolStillOptimizesMTU(t *testing.T) {
+	// When fewer resolvers are available than the pool wants, MTU optimization
+	// must still run (the pool size cannot be met anyway).
+	cfg := config.ClientConfig{
+		AutoRemoveLowMTUServers: true,
+		MTUOptimizerAggressive:  true,
+		ResolverPoolSize:        32,
+		RX_TX_Workers:           4,
+	}
+	c := buildTestClientWithResolvers(cfg, "a", "b", "c", "d")
+
+	valid, _, down, _ := c.optimizeMTUResolvers(mtuOutlierConnections())
+	if len(valid) != 3 {
+		t.Fatalf("expected the low outlier to be dropped, got %d resolvers", len(valid))
+	}
+	if down != 3592 {
+		t.Fatalf("expected session download MTU 3592, got %d", down)
+	}
+}
+
 func TestOptimizeMTUResolversDefaultKeepsLowOutlier(t *testing.T) {
 	cfg := config.ClientConfig{
 		AutoRemoveLowMTUServers: true,

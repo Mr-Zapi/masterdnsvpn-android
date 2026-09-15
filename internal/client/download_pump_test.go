@@ -180,21 +180,6 @@ func TestDownlinkPumpMaintainDecaysToSingleIdlePoll(t *testing.T) {
 	}
 }
 
-func TestWriterQueueHasPumpHeadroom(t *testing.T) {
-	c := &Client{}
-	c.encodedTXChannel = make(chan writerTask, 100)
-
-	if !c.writerQueueHasPumpHeadroom() {
-		t.Fatal("expected headroom on an empty writer queue")
-	}
-	for i := 0; i < 80; i++ {
-		c.encodedTXChannel <- writerTask{}
-	}
-	if c.writerQueueHasPumpHeadroom() {
-		t.Fatal("expected no pump headroom when the writer queue is mostly full")
-	}
-}
-
 func TestDownlinkPumpGlobalInFlightCap(t *testing.T) {
 	pump, _ := newTestDownlinkPump(t, 25)
 

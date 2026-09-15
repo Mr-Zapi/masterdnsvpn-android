@@ -267,6 +267,14 @@ func (c *Client) optimizeMTUResolversInner(connections []Connection) ([]Connecti
 		maxAllowedDrops = 1
 	}
 
+	// When the user wants to keep K resolvers, never drop below K. If the pool
+	// is already smaller than K, keep optimizing MTU (we cannot reach K anyway).
+	if c.cfg.ResolverPoolSize > 0 && totalValid > c.cfg.ResolverPoolSize {
+		if poolDrops := totalValid - c.cfg.ResolverPoolSize; poolDrops < maxAllowedDrops {
+			maxAllowedDrops = poolDrops
+		}
+	}
+
 	const (
 		minGapAbsUp     = 24
 		minGapAbsDown   = 96

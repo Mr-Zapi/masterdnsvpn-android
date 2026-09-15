@@ -461,12 +461,6 @@ func (p *downlinkPump) send(ctx context.Context, state *downlinkPumpState) bool 
 		return false
 	}
 
-	// Yield to real upload data: leave the writer queue reserve free so a
-	// flood of empty polls cannot delay stream packets.
-	if !client.writerQueueHasPumpHeadroom() {
-		return false
-	}
-
 	task := writerTask{
 		frames: []encodedOutboundDatagram{{
 			addr:      state.addr,
@@ -485,24 +479,6 @@ func (p *downlinkPump) send(ctx context.Context, state *downlinkPumpState) bool 
 		// Writer queue is full; back off and retry.
 		return false
 	}
-}
-
-// writerQueueHasPumpHeadroom reports whether the shared writer queue has room
-// for a low-priority poll without crowding out real upload data. The pump keeps
-// a reserve free so uploads never queue behind a flood of empty polls.
-func (c *Client) writerQueueHasPumpHeadroom() bool {
-	if c == nil || c.encodedTXChannel == nil {
-		return false
-	}
-	capacity := cap(c.encodedTXChannel)
-	if capacity <= 0 {
-		return true
-	}
-	reserve := capacity / 4
-	if reserve < 8 {
-		reserve = 8
-	}
-	return len(c.encodedTXChannel) <= capacity-reserve
 }
 
 // maintenance reaps stalled polls and adapts the per-resolver in-flight target
