@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -36,11 +37,64 @@ import (
 )
 
 var (
-	mu        sync.Mutex
-	running   bool
-	cancelFn  context.CancelFunc
-	tunEngine bool // whether the tun2socks engine has been started
+	mu      sync.Mutex
+	running atomic.Bool
+	// Fields below are guarded by mu. starting is true for the whole duration of
+	// a Start call (including config bootstrap and the readiness wait) so Stop
+	// can record stopRequested and Start can observe it before starting the
+	// tun2socks engine.
+	starting      bool
+	stopRequested bool
+	cancelFn      context.CancelFunc
+	tunEngine     bool // whether the tun2socks engine has been started
+	currentApp    *client.Client
 )
+
+// readyTimeout bounds how long Start waits for the client's local proxy listener
+// to come up before giving up.
+const readyTimeout = 120 * time.Second
+
+// mobileSpeedOverrides returns client config values tuned for throughput on a
+// phone. These do not change the wire protocol; they only adjust how the client
+// uses it (fewer duplicate packets, larger per-packet payloads, more in flight).
+func mobileSpeedOverrides() map[string]any {
+	return map[string]any{
+		// Do not send every packet twice: with one copy each packet is spread
+		// across the resolver pool (multipath), which is the main throughput win.
+		"PacketDuplicationCount": 1,
+		// Allow more data per tunnel packet. Discovery still finds the largest
+		// size the resolvers/server actually accept; these are upper bounds.
+		// 150 matches the server's MAX_ALLOWED_CLIENT_UPLOAD_MTU; 4096 is its
+		// MAX_ALLOWED_CLIENT_DOWNLOAD_MTU.
+		"MaxUploadMTU":   150,
+		"MaxDownloadMTU": 4096,
+		// Reject resolvers that truncate large DNS answers. The session's
+		// download MTU is the MINIMUM across active resolvers, so a single
+		// low-MTU resolver otherwise drags the whole tunnel down to its size
+		// (observed: 3603 found but only 653 selected). Raise/lower these if
+		// the tunnel cannot find enough valid resolvers.
+		"MinUploadMTU":   64,
+		"MinDownloadMTU": 1024,
+		// More queries in flight = more aggregate throughput on a high-RTT,
+		// UDP request/response tunnel. Server caps are 255 workers / 20 batch /
+		// 8000 ARQ window, so over-asking is clamped safely.
+		"RX_TX_Workers":        12,
+		"TunnelProcessWorkers": 12,
+		"MaxPacketsPerBatch":   20,
+		"ARQWindowSize":        8000,
+		"ARQDataNackMaxGap":    255,
+		// Raw binary payloads; base64 would inflate every packet by ~33%.
+		"BaseEncodeData": false,
+		// Discover resolvers on more parallel probes (faster startup only).
+		"MTUTestParallelism": 32,
+		// Dedicated download pullers: keep extra empty poll requests in flight
+		// on the best resolvers so the server returns more download fragments
+		// per RTT than the ACK-clocked flow alone. Use up to 25% of the active
+		// resolvers as download-only resolvers; 0 disables the pump.
+		"DownloadPumpResolversPercent": 25,
+		"DownloadPumpConcurrency":      6,
+	}
+}
 
 // Protector is implemented on the Android side by the VpnService. Protect makes
 // the socket with the given fd bypass the VPN tunnel (VpnService.protect), so
@@ -129,11 +183,29 @@ func parseDNSServers(raw string) []string {
 // error is returned.
 func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText string, directDNS string, filesDir string, protector Protector) error {
 	mu.Lock()
-	defer mu.Unlock()
-
-	if running {
+	if running.Load() || starting {
+		mu.Unlock()
 		return fmt.Errorf("already running")
 	}
+	starting = true
+	stopRequested = false
+	mu.Unlock()
+
+	// Do not hold mu across the (potentially long) readiness wait below, so
+	// IsRunning() stays non-blocking and Stop() can cancel an in-progress start.
+	defer func() {
+		mu.Lock()
+		starting = false
+		mu.Unlock()
+	}()
+
+	// stopped reports whether Stop() was requested while we were starting.
+	stopped := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return stopRequested
+	}
+
 	if tunFd <= 0 {
 		return fmt.Errorf("invalid tun fd: %d", tunFd)
 	}
@@ -161,6 +233,9 @@ func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText st
 			"LocalDNSEnabled": false,
 		},
 	}
+	for key, value := range mobileSpeedOverrides() {
+		overrides.Values[key] = value
+	}
 
 	cfg, err := config.LoadClientConfigFromJSONBase64WithOverrides(configB64, overrides)
 	if err != nil {
@@ -179,28 +254,100 @@ func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText st
 		app.SetDirectDNSResolver(makeDirectDNSResolver(dnsServers, protector))
 	}
 
+	// Stop() may have been requested during the (uncancellable) bootstrap above.
+	if stopped() {
+		return fmt.Errorf("start cancelled")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+	mu.Lock()
+	if stopRequested {
+		mu.Unlock()
+		cancel()
+		return fmt.Errorf("start cancelled")
+	}
+	cancelFn = cancel
+	currentApp = app
+	mu.Unlock()
 
 	// Run the DNS-tunnel client (owns the local SOCKS5 listener) in the
 	// background. Run blocks until ctx is cancelled.
+	runErrCh := make(chan error, 1)
+	runDone := make(chan struct{})
 	go func() {
-		_ = app.Run(ctx)
+		err := app.Run(ctx)
+		runErrCh <- err
+		close(runDone)
 	}()
+
+	// Do NOT start tun2socks until the client's local SOCKS5 listener is actually
+	// accepting connections. With a large (or slow) resolver list the client
+	// spends a long time MTU-testing before it opens the listener; forwarding
+	// traffic during that window makes every TCP flow reset. Waiting here makes
+	// the window invisible to apps.
+	readyTimer := time.NewTimer(readyTimeout)
+	defer readyTimer.Stop()
+
+	ready := false
+	select {
+	case <-app.Ready():
+		ready = true
+	case <-runDone:
+		// The client exited before it ever became ready (bad config, port in
+		// use, MTU failure, ...). Fall through and report the error.
+	case <-ctx.Done():
+	case <-readyTimer.C:
+	}
+
+	if !ready {
+		cancel()
+		mu.Lock()
+		cancelFn = nil
+		currentApp = nil
+		mu.Unlock()
+		if err := drainRunError(runErrCh); err != nil {
+			return fmt.Errorf("tunnel failed: %w", err)
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("start cancelled")
+		}
+		return fmt.Errorf("tunnel did not become ready")
+	}
 
 	// Start the tun2socks engine: read packets from the VpnService tun fd and
 	// forward them to the local SOCKS5 proxy.
 	key := &engine.Key{
-		Device:   fmt.Sprintf("fd://%d", tunFd),
-		Proxy:    fmt.Sprintf("socks5://127.0.0.1:%d", socksPort),
-		MTU:      mtu,
-		LogLevel: "info",
+		Device:                   fmt.Sprintf("fd://%d", tunFd),
+		Proxy:                    fmt.Sprintf("socks5://127.0.0.1:%d", socksPort),
+		MTU:                      mtu,
+		LogLevel:                 "info",
+		TCPModerateReceiveBuffer: true,
+		TCPSendBufferSize:        "4m",
+		TCPReceiveBufferSize:     "4m",
 	}
 	engine.Insert(key)
 	engine.Start()
 
+	// Stop() may have raced with us between the readiness check and the engine
+	// start. If so, tear the engine back down instead of leaving it running
+	// against a cancelled client.
+	mu.Lock()
+	cancelled := stopRequested || cancelFn == nil || ctx.Err() != nil
+	if !cancelled {
+		tunEngine = true
+		running.Store(true)
+	}
+	mu.Unlock()
+
+	if cancelled {
+		engine.Stop()
+		return fmt.Errorf("start cancelled")
+	}
+
 	// Override the tun2socks proxy so UDP :53 is resolved directly (see
 	// dnsproxy.go) while TCP keeps going through the SOCKS5 proxy. This sidesteps
-	// devices where the SOCKS5 UDP ASSOCIATE handshake fails.
+	// devices where the SOCKS5 UDP ASSOCIATE handshake fails. Must be set AFTER
+	// engine.Start(), because Start() installs the key's proxy again.
 	if len(dnsServers) > 0 {
 		if base, err := socks5proxy.New(fmt.Sprintf("127.0.0.1:%d", socksPort), "", ""); err == nil {
 			tunnel.T().SetProxy(&dnsProxy{
@@ -210,34 +357,63 @@ func Start(tunFd int, mtu int, socksPort int, configB64 string, resolversText st
 		}
 	}
 
-	cancelFn = cancel
-	tunEngine = true
-	running = true
 	return nil
 }
 
-// Stop tears the tunnel down. Safe to call when not running.
-func Stop() {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if !running {
-		return
+// drainRunError returns the client's Run error if the goroutine has already
+// finished, without blocking.
+func drainRunError(ch <-chan error) error {
+	select {
+	case err := <-ch:
+		return err
+	default:
+		return nil
 	}
-	if tunEngine {
-		engine.Stop()
-		tunEngine = false
-	}
-	if cancelFn != nil {
-		cancelFn()
-		cancelFn = nil
-	}
-	running = false
 }
 
-// IsRunning reports whether the tunnel is currently up.
-func IsRunning() bool {
+// Stop tears the tunnel down. Safe to call when not running (including while a
+// Start is still waiting, in which case it cancels that start).
+func Stop() {
 	mu.Lock()
-	defer mu.Unlock()
-	return running
+	cancel := cancelFn
+	cancelFn = nil
+	engineOn := tunEngine
+	tunEngine = false
+	currentApp = nil
+	// Record the stop so a Start that is still in its bootstrap/readiness phase
+	// aborts instead of bringing the tunnel up after this call returns.
+	if starting {
+		stopRequested = true
+	}
+	wasActive := starting || engineOn || cancel != nil || running.Load()
+	running.Store(false)
+	mu.Unlock()
+
+	if !wasActive {
+		return
+	}
+	if engineOn {
+		engine.Stop()
+	}
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// IsRunning reports whether the tunnel is currently up. Lock-free so it is safe
+// to call from the Android main thread while Start() is still working.
+func IsRunning() bool {
+	return running.Load()
+}
+
+// NotifyNetworkChanged tells the running client to rebuild its session, e.g.
+// after the Android default network appears or changes. Safe to call when the
+// tunnel is not running (it is then a no-op).
+func NotifyNetworkChanged() {
+	mu.Lock()
+	app := currentApp
+	mu.Unlock()
+	if app != nil {
+		app.NotifyNetworkChanged()
+	}
 }

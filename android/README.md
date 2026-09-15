@@ -97,7 +97,8 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 ## 4. Configure & connect
 
-The app has two text fields:
+The main screen has a **Config** field plus the currently active **DNS list**
+(managed from the *Manage DNS lists* screen).
 
 ### Config (base64 JSON)
 
@@ -126,27 +127,43 @@ Paste the resulting string into the **Config** field. (The app forces
 don't need those keys. Any other advanced tunables from `client_config.toml`
 can be added to the JSON if you want to override defaults.)
 
-### Resolvers
+### Resolvers / DNS lists
 
 The recursive DNS servers the tunnel sends its queries **through** (not your
-server — public recursors that will reach your delegated NS). One per line.
-The app pre-fills **Yandex DNS**, which stays reachable from Russian networks
-even during blocking:
+server — public recursors that will reach your delegated NS). Resolvers are kept
+as named **DNS lists**:
+
+- Tap **Manage DNS lists** to create, rename, duplicate, delete and activate
+  lists. The active list is what the tunnel uses.
+- Tap **Refresh** on that screen to download the public server lists from
+  [public-dns.info](https://public-dns.info) and
+  [publicdnsserver.com](https://publicdnsserver.com). Results from both providers
+  are merged and de-duplicated. The merged list is cached gzip-compressed on the
+  device, so it still works when the providers are unreachable.
+- Tap **Scan public DNS** to test cached candidates against your server using
+  the real MasterDnsVPN protocol (a plain DNS A-query cannot detect a tunnel
+  server). Pick a country or *ALL*, set the **max packets/second** (default 500)
+  and the optional **max resolvers to save** (`0` = all), and optionally turn
+  off *Full MTU discovery* (on by default). A progress bar tracks the scan.
+  **Save results** asks for a list name.
+  The scan runs in two phases: **Phase 1** sends one quick protocol probe per
+  candidate to find the live servers (masscan-style: one sender at a steady
+  rate, separate receivers match and validate answers), then **Phase 2** runs
+  full upload/download MTU discovery only on the servers that were alive.
+- To refresh an existing list, open its menu in **Manage DNS lists** and choose
+  **Rescan**. The scan page then pre-fills the save dialog with that list's name
+  and updates the list in place.
+
+The app starts you with a **Default** list containing **Yandex DNS**, which stays
+reachable from Russian networks even during blocking:
 
 ```
 77.88.8.8:53
 77.88.8.1:53
 ```
 
-You can add more (Google/Cloudflare/Quad9) below them — MasterDnsVPN balances
-across all working resolvers and auto-disables broken ones:
-
-```
-77.88.8.8:53
-77.88.8.1:53
-8.8.8.8:53
-1.1.1.1:53
-```
+You can add more (Google/Cloudflare/Quad9) — MasterDnsVPN balances across all
+working resolvers and auto-disables broken ones.
 
 Then tap **Connect** and accept the system VPN consent dialog. A key icon in the
 status bar means the tunnel is up.
@@ -162,6 +179,15 @@ status bar means the tunnel is up.
   client's local DNS feature in a future iteration.
 - IPv6 is not routed (IPv4 default route only). Add `addRoute("::",0)` +
   `addAddress` for an IPv6 ULA if you need it.
-- This is a first working client. Battery optimisation whitelisting and
-  auto-reconnect are not implemented yet.
+- **Battery optimization:** Android Doze suspends network access and ignores
+  wake locks, which used to make the tunnel die when the screen was off. The app
+  now prompts for the battery-optimization exemption on first connect (there is
+  also a **BATTERY** row on the main screen). Keeping that allowed is what lets
+  the tunnel survive with the screen off.
+- **Auto-reconnect:** the Go core has a session idle watchdog
+  (`SESSION_IDLE_RESTART_SECONDS`, default 90s) and the service listens for
+  default-network changes (`Mobile.NotifyNetworkChanged()`), so the tunnel
+  rebuilds its session after sleep or a network switch. A process kill is
+  recovered through `START_REDELIVER_INTENT` plus the config persisted in
+  `SharedPreferences`.
 ```

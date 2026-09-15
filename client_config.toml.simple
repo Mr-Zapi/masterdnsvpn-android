@@ -200,9 +200,31 @@ AUTO_REMOVE_LOW_MTU_SERVERS = true
 # MTU probe retries and timeout.
 # Parallelism is auto-raised internally when resolver count is large, but you
 # can still override it in advanced setups if needed.
+# NOTE: probes that time out (no response) are never retried, since an
+# oversized probe is normally dropped and a retry only burns another timeout.
 MTU_TEST_RETRIES = 2
 MTU_TEST_TIMEOUT = 2.0
 MTU_TEST_PARALLELISM = 32
+
+# Stop the MTU binary search once the remaining range is this small. A larger
+# value connects faster (fewer timeout-penalized overshoot probes) at the cost
+# of a slightly conservative MTU. Clamped to [1, 512].
+MTU_SEARCH_TOLERANCE = 32
+
+# Fast start: begin the tunnel immediately using cached/safe MTU values, then
+# re-discover MTU in the background and hot-apply the result.
+MTU_BACKGROUND_DISCOVERY = true
+
+# How long a cached per-resolver MTU stays valid, in seconds (0 = never expire).
+MTU_CACHE_TTL_SECONDS = 86400.0
+
+# Dedicated download pullers. Keep extra empty poll requests in flight on the
+# best-download resolvers so the server returns more download fragments per RTT
+# than the ACK-clocked flow alone. The resolver count can be set as a percentage
+# of the active pool (peak) and/or an absolute cap. Either 0 disables that limit.
+DOWNLOAD_PUMP_RESOLVERS_PERCENT = 0
+DOWNLOAD_PUMP_RESOLVERS = 0
+DOWNLOAD_PUMP_CONCURRENCY = 4
 
 # Export successful MTU-tested resolvers to a file.
 SAVE_MTU_SERVERS_TO_FILE = false
@@ -272,6 +294,12 @@ SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS = 60.0
 # Higher values improve reliability on unstable networks but increase DNS traffic.
 # Clamped to [1, 5].
 SESSION_INIT_RACING_COUNT = 3
+
+# Self-healing session idle timeout. If a ready session receives no inbound
+# tunnel packet for this long, the client rebuilds the session (re-runs MTU
+# tests and session init). This recovers the tunnel after Doze or a silent
+# network loss on Android. Clamped to [5, 3600].
+SESSION_IDLE_RESTART_SECONDS = 90.0
 
 # Ping/keepalive pacing.
 # These control how aggressively the client sends ping traffic depending on

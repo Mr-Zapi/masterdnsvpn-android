@@ -120,10 +120,17 @@ printf '%s' "{\"DOMAINS\":[\"t.example.com\"],\"DATA_ENCRYPTION_METHOD\":2,\"ENC
 
 Paste the resulting string into the **Config** field.
 
-### Resolvers
+### Resolvers (DNS lists)
 
-Public DNS resolvers the tunnel sends its queries *through*. Pre-filled with
-**Yandex DNS** (reachable in Russia during blocking); you can add more:
+Public DNS resolvers the tunnel sends its queries *through*. They are stored as
+named DNS lists: open **Manage DNS lists** to create, rename, activate or delete
+lists, and use **Scan public DNS** to test candidates downloaded from
+[public-dns.info](https://public-dns.info) and
+[publicdnsserver.com](https://publicdnsserver.com) against your server using the
+real tunnel protocol. Lists from both providers are merged and de-duplicated.
+The merged list is cached gzip-compressed on the device so scanning still works
+when the providers are unavailable. A **Default** list pre-filled with
+**Yandex DNS** is created on first run:
 
 ```
 77.88.8.8:53

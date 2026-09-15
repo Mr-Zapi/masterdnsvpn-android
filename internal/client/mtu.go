@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -25,7 +26,21 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
-var ErrNoValidConnections = errors.New("no valid connections after mtu testing")
+var (
+	ErrNoValidConnections = errors.New("no valid connections after mtu testing")
+	// errMTUProbeTimeout marks a probe that got no answer at all. An oversized
+	// probe is normally dropped, so this is expected and retrying it only burns
+	// another full timeout; binarySearchMTU therefore does not retry it.
+	errMTUProbeTimeout = errors.New("mtu probe timeout")
+)
+
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
 
 const (
 	mtuProbeCodeLength  = 4
@@ -324,47 +339,11 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 		return ErrNoValidConnections
 	}
 
-	uploadCaps := c.precomputeUploadCaps()
 	workerCount := min(max(1, c.cfg.EffectiveMTUTestParallelism()), len(scanConnections))
 	c.logMTUStart(workerCount)
 	c.prepareMTUSuccessOutputFile()
 
-	counters := &mtuScanCounters{}
-	if workerCount <= 1 {
-		for idx := range scanConnections {
-			if err := ctx.Err(); err != nil {
-				return nil
-			}
-			conn := scanConnections[idx]
-			c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-		}
-	} else {
-		jobs := make(chan int, len(scanConnections))
-		var wg sync.WaitGroup
-		for range workerCount {
-			wg.Go(func() {
-				for idx := range jobs {
-					if err := ctx.Err(); err != nil {
-						return
-					}
-					conn := scanConnections[idx]
-					c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
-				}
-			})
-		}
-
-		for idx := range scanConnections {
-			select {
-			case <-ctx.Done():
-				close(jobs)
-				wg.Wait()
-				return nil
-			case jobs <- idx:
-			}
-		}
-		close(jobs)
-		wg.Wait()
-	}
+	c.probeAllConnectionsMTU(ctx, scanConnections)
 
 	activeConns := c.balancer.ActiveConnections()
 	validConns, minUpload, minDownload, minUploadChars := c.optimizeMTUResolvers(activeConns)
@@ -376,9 +355,242 @@ func (c *Client) RunInitialMTUTests(ctx context.Context) error {
 	}
 
 	c.applySyncedMTUState(minUpload, minDownload, minUploadChars)
+	c.cacheMTUResults(validConns, minUpload, minDownload)
 	c.appendMTUUsageSeparatorOnce()
 	c.logMTUCompletion(validConns)
 	return nil
+}
+
+// probeAllConnectionsMTU runs the per-resolver MTU probes with bounded
+// parallelism. It only measures and applies per-connection results; callers
+// decide how to fold them into the session MTU.
+func (c *Client) probeAllConnectionsMTU(ctx context.Context, scanConnections []Connection) {
+	if c == nil || c.balancer == nil || len(scanConnections) == 0 {
+		return
+	}
+
+	uploadCaps := c.precomputeUploadCaps()
+	workerCount := min(max(1, c.cfg.EffectiveMTUTestParallelism()), len(scanConnections))
+	counters := &mtuScanCounters{}
+	if workerCount <= 1 {
+		for idx := range scanConnections {
+			if err := ctx.Err(); err != nil {
+				return
+			}
+			conn := scanConnections[idx]
+			c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
+		}
+		return
+	}
+
+	jobs := make(chan int, len(scanConnections))
+	var wg sync.WaitGroup
+	for range workerCount {
+		wg.Go(func() {
+			for idx := range jobs {
+				if err := ctx.Err(); err != nil {
+					return
+				}
+				conn := scanConnections[idx]
+				c.runConnectionMTUTest(ctx, conn, idx+1, len(scanConnections), uploadCaps[conn.Domain], counters)
+			}
+		})
+	}
+
+	for idx := range scanConnections {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return
+		case jobs <- idx:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+// mtuCacheSessionKey stores the optimized, session-wide MTU alongside the
+// per-resolver entries so a fast start reuses the same value the optimizer
+// picked instead of the raw minimum.
+const mtuCacheSessionKey = "__session__"
+
+// cacheMTUResults stores the discovered MTUs for the next fast start.
+func (c *Client) cacheMTUResults(conns []Connection, sessionUpload, sessionDownload int) {
+	if c == nil || c.mtuCache == nil {
+		return
+	}
+	now := time.Now()
+	for _, conn := range conns {
+		if conn.Key == "" || conn.UploadMTUBytes <= 0 || conn.DownloadMTUBytes <= 0 {
+			continue
+		}
+		c.mtuCache.put(conn.Key, conn.UploadMTUBytes, conn.DownloadMTUBytes, now)
+	}
+	if sessionUpload > 0 && sessionDownload > 0 {
+		c.mtuCache.put(mtuCacheSessionKey, sessionUpload, sessionDownload, now)
+	}
+	if err := c.mtuCache.persist(); err != nil && c.log != nil && c.log.Enabled(logger.LevelWarn) {
+		c.log.Warnf("<yellow>MTU cache write failed: %v</yellow>", err)
+	}
+}
+
+// seedMTUFromCache applies cached MTU values to the balancer so the session can
+// start immediately. It returns true when at least one fresh entry was applied.
+func (c *Client) seedMTUFromCache() bool {
+	if c == nil || c.balancer == nil || c.mtuCache == nil {
+		return false
+	}
+	conns := c.balancer.AllConnections()
+	if len(conns) == 0 {
+		return false
+	}
+
+	now := time.Now()
+	seeded := 0
+	for _, conn := range conns {
+		entry, ok := c.mtuCache.get(conn.Key, now)
+		if !ok {
+			continue
+		}
+		_ = c.balancer.ApplyMTUProbeResult(
+			conn.Key,
+			entry.Upload,
+			c.encodedCharsForPayload(entry.Upload),
+			entry.Download,
+			0,
+			true,
+		)
+		seeded++
+	}
+	if seeded == 0 {
+		return false
+	}
+
+	up, down, chars, ok := c.minActiveMTU()
+	if !ok {
+		return false
+	}
+	// Prefer the optimized session-wide value cached by the last discovery so
+	// the fast start does not regress to the raw minimum.
+	if entry, ok := c.mtuCache.get(mtuCacheSessionKey, now); ok {
+		up, down, chars = entry.Upload, entry.Download, c.encodedCharsForPayload(entry.Upload)
+	}
+	c.applySyncedMTUState(up, down, chars)
+	if c.log != nil {
+		c.log.Infof(
+			"\U0001F4E6 <green>MTU: started from cache for <cyan>%d</cyan> resolver(s) (UP=<cyan>%d</cyan>, DOWN=<cyan>%d</cyan>); refreshing in background</green>",
+			seeded, up, down,
+		)
+	}
+	return true
+}
+
+// seedSafeMTUDefaults marks every resolver valid with conservative MTU values so
+// the session can start before the first background discovery finishes.
+func (c *Client) seedSafeMTUDefaults() bool {
+	if c == nil || c.balancer == nil {
+		return false
+	}
+	conns := c.balancer.AllConnections()
+	if len(conns) == 0 {
+		return false
+	}
+
+	upload := c.cfg.MinUploadMTU
+	if upload <= 0 {
+		upload = minUploadMTUFloor
+	}
+	if c.cfg.MaxUploadMTU > 0 && upload > c.cfg.MaxUploadMTU {
+		upload = c.cfg.MaxUploadMTU
+	}
+	download := c.cfg.MinDownloadMTU
+	if download <= 0 {
+		download = minDownloadMTUFloor
+	}
+	if c.cfg.MaxDownloadMTU > 0 && download > c.cfg.MaxDownloadMTU {
+		download = c.cfg.MaxDownloadMTU
+	}
+	chars := c.encodedCharsForPayload(upload)
+
+	for _, conn := range conns {
+		if conn.Key == "" {
+			continue
+		}
+		_ = c.balancer.ApplyMTUProbeResult(conn.Key, upload, chars, download, 0, true)
+	}
+	c.applySyncedMTUState(upload, download, chars)
+	if c.log != nil {
+		c.log.Infof(
+			"\U0001F4E6 <yellow>MTU: no cache, starting with safe defaults (UP=<cyan>%d</cyan>, DOWN=<cyan>%d</cyan>); discovering in background</yellow>",
+			upload, download,
+		)
+	}
+	return true
+}
+
+// minActiveMTU returns the minimum upload/download MTU across active resolvers.
+func (c *Client) minActiveMTU() (upload int, download int, chars int, ok bool) {
+	if c == nil || c.balancer == nil {
+		return 0, 0, 0, false
+	}
+	for _, conn := range c.balancer.ActiveConnections() {
+		if conn.UploadMTUBytes <= 0 || conn.DownloadMTUBytes <= 0 {
+			continue
+		}
+		if upload == 0 || conn.UploadMTUBytes < upload {
+			upload = conn.UploadMTUBytes
+		}
+		if download == 0 || conn.DownloadMTUBytes < download {
+			download = conn.DownloadMTUBytes
+		}
+	}
+	if upload <= 0 || download <= 0 {
+		return 0, 0, 0, false
+	}
+	return upload, download, c.encodedCharsForPayload(upload), true
+}
+
+// runBackgroundMTUDiscovery refreshes resolver MTUs while the tunnel is up and
+// hot-applies the new session MTU. It never blocks startup.
+func (c *Client) runBackgroundMTUDiscovery(ctx context.Context) {
+	if c == nil || c.balancer == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil && c.log != nil {
+			c.log.Errorf("<red>MTU background discovery panic: %v</red>", r)
+		}
+	}()
+
+	// Let the session settle so the first probes do not compete with startup.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(2 * time.Second):
+	}
+
+	conns := c.balancer.AllConnections()
+	if len(conns) == 0 {
+		return
+	}
+	if c.log != nil {
+		c.log.Infof("\U0001F50D <cyan>MTU: background discovery started</cyan>")
+	}
+
+	c.probeAllConnectionsMTU(ctx, conns)
+
+	activeConns := c.balancer.ActiveConnections()
+	validConns, up, down, chars := c.optimizeMTUResolvers(activeConns)
+	applied := false
+	if len(validConns) > 0 && up > 0 && down > 0 {
+		c.applySyncedMTUState(up, down, chars)
+		applied = true
+	}
+	c.cacheMTUResults(validConns, up, down)
+	if c.log != nil && applied {
+		c.log.Infof("\U0001F4CF <green>MTU: background discovery applied (UP=<cyan>%d</cyan>, DOWN=<cyan>%d</cyan>)</green>", up, down)
+	}
 }
 
 func (c *Client) runResolverHealthLoop(ctx context.Context) {
@@ -1068,6 +1280,11 @@ func (c *Client) binarySearchMTU(ctx context.Context, label string, minValue, ma
 				rtt = measuredRTT
 				break
 			}
+			// A silent drop means the value is likely above the path limit.
+			// Retrying only costs another full timeout, so stop here.
+			if errors.Is(err, errMTUProbeTimeout) {
+				break
+			}
 		}
 		return ok, rtt
 	}
@@ -1104,6 +1321,10 @@ func (c *Client) binarySearchMTU(ctx context.Context, label string, minValue, ma
 
 	left := low + 1
 	right := high - 1
+	tolerance := c.mtuSearchTolerance
+	if tolerance < 1 {
+		tolerance = 1
+	}
 	for left <= right {
 		if err := ctx.Err(); err != nil {
 			return 0, 0
@@ -1115,6 +1336,11 @@ func (c *Client) binarySearchMTU(ctx context.Context, label string, minValue, ma
 			left = mid + 1
 		} else {
 			right = mid - 1
+		}
+		// Stop once the remaining window is within tolerance. The result is a
+		// few bytes conservative but skips several timeout-penalized probes.
+		if right-left < tolerance {
+			break
 		}
 	}
 	if c.log != nil && c.log.Enabled(logger.LevelDebug) {
@@ -1148,6 +1374,10 @@ func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeT
 		return false, 0, nil
 	}
 
+	if err := c.waitProbeGate(ctx); err != nil {
+		return false, 0, err
+	}
+
 	startedAt := time.Now()
 	response, err := c.exchangeUDPQuery(probeTransport, query, timeout)
 	if err != nil {
@@ -1159,6 +1389,9 @@ func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeT
 			conn.ResolverLabel,
 			conn.Domain,
 		)
+		if isTimeoutError(err) {
+			return false, 0, errMTUProbeTimeout
+		}
 		return false, 0, nil
 	}
 	rtt := time.Since(startedAt)
@@ -1266,6 +1499,10 @@ func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn Connection, prob
 		return false, 0, nil
 	}
 
+	if err := c.waitProbeGate(ctx); err != nil {
+		return false, 0, err
+	}
+
 	startedAt := time.Now()
 	response, err := c.exchangeUDPQuery(probeTransport, query, timeout)
 	if err != nil {
@@ -1277,6 +1514,9 @@ func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn Connection, prob
 			conn.ResolverLabel,
 			conn.Domain,
 		)
+		if isTimeoutError(err) {
+			return false, 0, errMTUProbeTimeout
+		}
 		return false, 0, nil
 	}
 

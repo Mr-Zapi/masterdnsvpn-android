@@ -1,11 +1,19 @@
 package com.masterdnsvpn.client
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
+import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -19,14 +27,17 @@ import mobile.Mobile
 class MainActivity : AppCompatActivity() {
 
     private lateinit var configInput: EditText
-    private lateinit var resolversInput: EditText
+    private lateinit var activeListText: TextView
+    private lateinit var manageListsButton: Button
     private lateinit var powerButton: FrameLayout
     private lateinit var powerIcon: ImageView
     private lateinit var glow: android.view.View
     private lateinit var statusText: TextView
     private lateinit var hintText: TextView
+    private lateinit var batteryText: TextView
 
     private val prefs by lazy { getSharedPreferences("masterdnsvpn", Context.MODE_PRIVATE) }
+    private lateinit var store: DnsListStore
     private val ui = Handler(Looper.getMainLooper())
 
     // True from the moment the user taps connect until the core reports running.
@@ -51,37 +62,73 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            // Best effort: continue even if the user denies it.
+            maybeAskBatteryOptimization()
+        }
+
+    private val batteryOptimizationLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            // Result code is unreliable for this system dialog, so just re-check
+            // the exemption state and continue regardless of the outcome.
+            updateBatteryStatus()
+            requestVpnConsent()
+        }
+
     companion object {
         private const val DEFAULT_RESOLVERS = "77.88.8.8:53\n77.88.8.1:53"
+        private const val PREF_BATTERY_PROMPTED = "battery_opt_prompted"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        store = DnsListStore.get(this)
+        store.seedFromLegacy(
+            prefs.getString("resolvers", "").orEmpty(),
+            DEFAULT_RESOLVERS.split('\n')
+        )
+
         configInput = findViewById(R.id.configInput)
-        resolversInput = findViewById(R.id.resolversInput)
+        activeListText = findViewById(R.id.activeListText)
+        manageListsButton = findViewById(R.id.manageListsButton)
         powerButton = findViewById(R.id.powerButton)
         powerIcon = findViewById(R.id.powerIcon)
         glow = findViewById(R.id.glow)
         statusText = findViewById(R.id.statusText)
         hintText = findViewById(R.id.hintText)
+        batteryText = findViewById(R.id.batteryText)
 
         configInput.setText(prefs.getString("config_b64", ""))
-        resolversInput.setText(prefs.getString("resolvers", DEFAULT_RESOLVERS))
 
         powerButton.setOnClickListener { onPowerTapped() }
+        manageListsButton.setOnClickListener {
+            startActivity(Intent(this, DnsListsActivity::class.java))
+        }
+        batteryText.setOnClickListener { onBatteryTapped() }
     }
 
     override fun onResume() {
         super.onResume()
-        connecting = false
+        updateActiveList()
+        updateBatteryStatus()
         ui.post(poller)
     }
 
     override fun onPause() {
         super.onPause()
         ui.removeCallbacks(poller)
+    }
+
+    private fun updateActiveList() {
+        val active = store.active()
+        activeListText.text = if (active == null) {
+            "No DNS list selected"
+        } else {
+            "${active.name}\n${active.servers.size} servers"
+        }
     }
 
     private fun onPowerTapped() {
@@ -96,26 +143,105 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Paste your base64 config first", Toast.LENGTH_SHORT).show()
                 return
             }
+            if (store.active() == null) {
+                Toast.makeText(this, "Create or select a DNS list first", Toast.LENGTH_SHORT).show()
+                return
+            }
             connecting = true
             refreshUi()
-            val intent = VpnService.prepare(this)
-            if (intent != null) vpnPermissionLauncher.launch(intent) else startVpn()
+            beginConnect()
+        }
+    }
+
+    private fun beginConnect() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            // Ask first, then continue to the VPN consent in its result callback
+            // so the two system dialogs never launch at the same time.
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        maybeAskBatteryOptimization()
+    }
+
+    private fun requestVpnConsent() {
+        val intent = VpnService.prepare(this)
+        if (intent != null) vpnPermissionLauncher.launch(intent) else startVpn()
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        return pm.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    private fun maybeAskBatteryOptimization() {
+        if (isIgnoringBatteryOptimizations() || prefs.getBoolean(PREF_BATTERY_PROMPTED, false)) {
+            requestVpnConsent()
+            return
+        }
+        // Ask once. If the user declines we still connect, but the BATTERY row
+        // below stays visible so they can grant it later.
+        prefs.edit().putBoolean(PREF_BATTERY_PROMPTED, true).apply()
+        launchBatteryOptimizationRequest()
+    }
+
+    @SuppressLint("BatteryLife")
+    private fun launchBatteryOptimizationRequest() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            requestVpnConsent()
+            return
+        }
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                .setData(Uri.parse("package:$packageName"))
+            batteryOptimizationLauncher.launch(intent)
+        } catch (e: Exception) {
+            // Some OEMs do not expose this action; fall back to the settings list.
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (_: Exception) {
+            }
+            requestVpnConsent()
+        }
+    }
+
+    private fun onBatteryTapped() {
+        if (isIgnoringBatteryOptimizations()) {
+            Toast.makeText(this, "Background access already allowed", Toast.LENGTH_SHORT).show()
+            return
+        }
+        launchBatteryOptimizationRequest()
+    }
+
+    private fun updateBatteryStatus() {
+        if (!::batteryText.isInitialized) return
+        val accent = ContextCompat.getColor(this, R.color.accent)
+        val warning = ContextCompat.getColor(this, R.color.warning)
+        if (isIgnoringBatteryOptimizations()) {
+            batteryText.text = "Background access allowed \u2013 tunnel stays alive in sleep"
+            batteryText.setTextColor(accent)
+        } else {
+            batteryText.text = "Restricted \u2013 tap to stop the tunnel disconnecting in sleep"
+            batteryText.setTextColor(warning)
         }
     }
 
     private fun saveInputs() {
         prefs.edit()
             .putString("config_b64", configInput.text.toString().trim())
-            .putString("resolvers", resolversInput.text.toString())
             .apply()
     }
 
     private fun startVpn() {
+        val servers = store.serversText(store.active())
         val intent = Intent(this, MasterDnsVpnService::class.java)
         intent.action = MasterDnsVpnService.ACTION_CONNECT
         intent.putExtra(MasterDnsVpnService.EXTRA_CONFIG_B64, configInput.text.toString().trim())
-        intent.putExtra(MasterDnsVpnService.EXTRA_RESOLVERS, resolversInput.text.toString())
-        startForegroundService(intent)
+        intent.putExtra(MasterDnsVpnService.EXTRA_RESOLVERS, servers)
+        ContextCompat.startForegroundService(this, intent)
         refreshUi()
     }
 
@@ -126,6 +252,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshUi() {
+        val startError = prefs.getString(MasterDnsVpnService.PREF_LAST_ERROR, null)
+        if (startError != null) {
+            prefs.edit().remove(MasterDnsVpnService.PREF_LAST_ERROR).apply()
+            connecting = false
+            Toast.makeText(this, "VPN failed: $startError", Toast.LENGTH_LONG).show()
+        }
+
         val running = isRunning()
         if (running) connecting = false
 
@@ -144,7 +277,7 @@ class MainActivity : AppCompatActivity() {
                 powerButton.setBackgroundResource(R.drawable.bg_power_off)
                 powerIcon.setColorFilter(accent)
                 glow.animate().alpha(0.25f).setDuration(400).start()
-                statusText.text = "Connecting…"
+                statusText.text = "Connecting\u2026"
                 hintText.text = "Establishing tunnel"
             }
             else -> {

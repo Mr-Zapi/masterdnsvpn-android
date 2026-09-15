@@ -9,4 +9,5 @@
     <color name="accent">#3DDC97</color>
     <color name="accent_dim">#14342A</color>
     <color name="idle_ring">#2A3140</color>
+    <color name="warning">#F2B34B</color>
 </resources>

@@ -24,98 +24,115 @@ import (
 )
 
 type ClientConfig struct {
-	ConfigDir                             string            `toml:"-"`
-	ConfigPath                            string            `toml:"-"`
-	ResolversFilePath                     string            `toml:"-"`
-	explicitRX_TX_Workers                 bool              `toml:"-"`
-	explicitTunnelProcessWorkers          bool              `toml:"-"`
-	ProtocolType                          string            `toml:"PROTOCOL_TYPE"`
-	Domains                               []string          `toml:"DOMAINS"`
-	ListenIP                              string            `toml:"LISTEN_IP"`
-	ListenPort                            int               `toml:"LISTEN_PORT"`
-	SOCKS5Auth                            bool              `toml:"SOCKS5_AUTH"`
-	SOCKS5User                            string            `toml:"SOCKS5_USER"`
-	SOCKS5Pass                            string            `toml:"SOCKS5_PASS"`
-	LocalDNSEnabled                       bool              `toml:"LOCAL_DNS_ENABLED"`
-	LocalDNSIP                            string            `toml:"LOCAL_DNS_IP"`
-	LocalDNSPort                          int               `toml:"LOCAL_DNS_PORT"`
-	LocalDNSCacheMaxRecords               int               `toml:"LOCAL_DNS_CACHE_MAX_RECORDS"`
-	LocalDNSCacheTTLSeconds               float64           `toml:"LOCAL_DNS_CACHE_TTL_SECONDS"`
-	LocalDNSPendingTimeoutSec             float64           `toml:"LOCAL_DNS_PENDING_TIMEOUT_SECONDS"`
-	LocalDNSCachePersist                  bool              `toml:"LOCAL_DNS_CACHE_PERSIST_TO_FILE"`
-	LocalDNSCacheFlushSec                 float64           `toml:"LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS"`
-	ResolverBalancingStrategy             int               `toml:"RESOLVER_BALANCING_STRATEGY"`
-	PacketDuplicationCount                int               `toml:"PACKET_DUPLICATION_COUNT"`
-	SetupPacketDuplicationCount           int               `toml:"SETUP_PACKET_DUPLICATION_COUNT"`
-	StreamResolverFailoverResendThreshold int               `toml:"STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD"`
-	StreamResolverFailoverCooldownSec     float64           `toml:"STREAM_RESOLVER_FAILOVER_COOLDOWN"`
-	RecheckInactiveServersEnabled         bool              `toml:"RECHECK_INACTIVE_SERVERS_ENABLED"`
-	AutoDisableTimeoutServers             bool              `toml:"AUTO_DISABLE_TIMEOUT_SERVERS"`
-	AutoDisableTimeoutWindowSeconds       float64           `toml:"AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS"`
-	BaseEncodeData                        bool              `toml:"BASE_ENCODE_DATA"`
-	UploadCompressionType                 int               `toml:"UPLOAD_COMPRESSION_TYPE"`
-	DownloadCompressionType               int               `toml:"DOWNLOAD_COMPRESSION_TYPE"`
-	CompressionMinSize                    int               `toml:"COMPRESSION_MIN_SIZE"`
-	DataEncryptionMethod                  int               `toml:"DATA_ENCRYPTION_METHOD"`
-	EncryptionKey                         string            `toml:"ENCRYPTION_KEY"`
-	MinUploadMTU                          int               `toml:"MIN_UPLOAD_MTU"`
-	MinDownloadMTU                        int               `toml:"MIN_DOWNLOAD_MTU"`
-	MaxUploadMTU                          int               `toml:"MAX_UPLOAD_MTU"`
-	MaxDownloadMTU                        int               `toml:"MAX_DOWNLOAD_MTU"`
-	AutoRemoveLowMTUServers               bool              `toml:"AUTO_REMOVE_LOW_MTU_SERVERS"`
-	MTUTestRetries                        int               `toml:"MTU_TEST_RETRIES"`
-	MTUTestTimeout                        float64           `toml:"MTU_TEST_TIMEOUT"`
-	MTUTestParallelism                    int               `toml:"MTU_TEST_PARALLELISM"`
-	RX_TX_Workers                         int               `toml:"RX_TX_WORKERS"`
-	LegacyTunnelReaderWorkers             int               `toml:"TUNNEL_READER_WORKERS"`
-	LegacyTunnelWriterWorkers             int               `toml:"TUNNEL_WRITER_WORKERS"`
-	TunnelProcessWorkers                  int               `toml:"TUNNEL_PROCESS_WORKERS"`
-	TunnelPacketTimeoutSec                float64           `toml:"TUNNEL_PACKET_TIMEOUT_SECONDS"`
-	DispatcherIdlePollIntervalSeconds     float64           `toml:"DISPATCHER_IDLE_POLL_INTERVAL_SECONDS"`
-	PingAggressiveIntervalSeconds         float64           `toml:"PING_AGGRESSIVE_INTERVAL_SECONDS"`
-	PingLazyIntervalSeconds               float64           `toml:"PING_LAZY_INTERVAL_SECONDS"`
-	PingCooldownIntervalSeconds           float64           `toml:"PING_COOLDOWN_INTERVAL_SECONDS"`
-	PingColdIntervalSeconds               float64           `toml:"PING_COLD_INTERVAL_SECONDS"`
-	PingWarmThresholdSeconds              float64           `toml:"PING_WARM_THRESHOLD_SECONDS"`
-	PingCoolThresholdSeconds              float64           `toml:"PING_COOL_THRESHOLD_SECONDS"`
-	PingColdThresholdSeconds              float64           `toml:"PING_COLD_THRESHOLD_SECONDS"`
-	RXChannelSize                         int               `toml:"RX_CHANNEL_SIZE"`
-	DNSResponseFragmentTimeoutSeconds     float64           `toml:"DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS"`
-	SOCKSUDPAssociateReadTimeoutSeconds   float64           `toml:"SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS"`
-	ClientTerminalStreamRetentionSeconds  float64           `toml:"CLIENT_TERMINAL_STREAM_RETENTION_SECONDS"`
-	ClientCancelledSetupRetentionSeconds  float64           `toml:"CLIENT_CANCELLED_SETUP_RETENTION_SECONDS"`
-	SessionInitRetryBaseSeconds           float64           `toml:"SESSION_INIT_RETRY_BASE_SECONDS"`
-	SessionInitRetryStepSeconds           float64           `toml:"SESSION_INIT_RETRY_STEP_SECONDS"`
-	SessionInitRetryLinearAfter           int               `toml:"SESSION_INIT_RETRY_LINEAR_AFTER"`
-	SessionInitRetryMaxSeconds            float64           `toml:"SESSION_INIT_RETRY_MAX_SECONDS"`
-	SessionInitBusyRetryIntervalSeconds   float64           `toml:"SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS"`
-	SessionInitRacingCount                int               `toml:"SESSION_INIT_RACING_COUNT"`
-	SaveMTUServersToFile                  bool              `toml:"SAVE_MTU_SERVERS_TO_FILE"`
-	MTUServersFileName                    string            `toml:"MTU_SERVERS_FILE_NAME"`
-	MTUServersFileFormat                  string            `toml:"MTU_SERVERS_FILE_FORMAT"`
-	MTUUsingSeparatorText                 string            `toml:"MTU_USING_SECTION_SEPARATOR_TEXT"`
-	MTURemovedServerLogFormat             string            `toml:"MTU_REMOVED_SERVER_LOG_FORMAT"`
-	MTUAddedServerLogFormat               string            `toml:"MTU_ADDED_SERVER_LOG_FORMAT"`
-	MTUReactiveAddedServerLogFormat       string            `toml:"MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT"`
-	LogLevel                              string            `toml:"LOG_LEVEL"`
-	MaxPacketsPerBatch                    int               `toml:"MAX_PACKETS_PER_BATCH"`
-	ARQWindowSize                         int               `toml:"ARQ_WINDOW_SIZE"`
-	ARQInitialRTOSeconds                  float64           `toml:"ARQ_INITIAL_RTO_SECONDS"`
-	ARQMaxRTOSeconds                      float64           `toml:"ARQ_MAX_RTO_SECONDS"`
-	ARQControlInitialRTOSeconds           float64           `toml:"ARQ_CONTROL_INITIAL_RTO_SECONDS"`
-	ARQControlMaxRTOSeconds               float64           `toml:"ARQ_CONTROL_MAX_RTO_SECONDS"`
-	ARQMaxControlRetries                  int               `toml:"ARQ_MAX_CONTROL_RETRIES"`
-	ARQInactivityTimeoutSeconds           float64           `toml:"ARQ_INACTIVITY_TIMEOUT_SECONDS"`
-	ARQDataPacketTTLSeconds               float64           `toml:"ARQ_DATA_PACKET_TTL_SECONDS"`
-	ARQControlPacketTTLSeconds            float64           `toml:"ARQ_CONTROL_PACKET_TTL_SECONDS"`
-	ARQMaxDataRetries                     int               `toml:"ARQ_MAX_DATA_RETRIES"`
-	ARQDataNackMaxGap                     int               `toml:"ARQ_DATA_NACK_MAX_GAP"`
-	ARQDataNackInitialDelaySeconds        float64           `toml:"ARQ_DATA_NACK_INITIAL_DELAY_SECONDS"`
-	ARQDataNackRepeatSeconds              float64           `toml:"ARQ_DATA_NACK_REPEAT_SECONDS"`
-	ARQTerminalDrainTimeoutSec            float64           `toml:"ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS"`
-	ARQTerminalAckWaitTimeoutSec          float64           `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
-	Resolvers                             []ResolverAddress `toml:"-"`
-	ResolverMap                           map[string]int    `toml:"-"`
+	ConfigDir                             string   `toml:"-"`
+	ConfigPath                            string   `toml:"-"`
+	ResolversFilePath                     string   `toml:"-"`
+	explicitRX_TX_Workers                 bool     `toml:"-"`
+	explicitTunnelProcessWorkers          bool     `toml:"-"`
+	ProtocolType                          string   `toml:"PROTOCOL_TYPE"`
+	Domains                               []string `toml:"DOMAINS"`
+	ListenIP                              string   `toml:"LISTEN_IP"`
+	ListenPort                            int      `toml:"LISTEN_PORT"`
+	SOCKS5Auth                            bool     `toml:"SOCKS5_AUTH"`
+	SOCKS5User                            string   `toml:"SOCKS5_USER"`
+	SOCKS5Pass                            string   `toml:"SOCKS5_PASS"`
+	LocalDNSEnabled                       bool     `toml:"LOCAL_DNS_ENABLED"`
+	LocalDNSIP                            string   `toml:"LOCAL_DNS_IP"`
+	LocalDNSPort                          int      `toml:"LOCAL_DNS_PORT"`
+	LocalDNSCacheMaxRecords               int      `toml:"LOCAL_DNS_CACHE_MAX_RECORDS"`
+	LocalDNSCacheTTLSeconds               float64  `toml:"LOCAL_DNS_CACHE_TTL_SECONDS"`
+	LocalDNSPendingTimeoutSec             float64  `toml:"LOCAL_DNS_PENDING_TIMEOUT_SECONDS"`
+	LocalDNSCachePersist                  bool     `toml:"LOCAL_DNS_CACHE_PERSIST_TO_FILE"`
+	LocalDNSCacheFlushSec                 float64  `toml:"LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS"`
+	ResolverBalancingStrategy             int      `toml:"RESOLVER_BALANCING_STRATEGY"`
+	PacketDuplicationCount                int      `toml:"PACKET_DUPLICATION_COUNT"`
+	SetupPacketDuplicationCount           int      `toml:"SETUP_PACKET_DUPLICATION_COUNT"`
+	StreamResolverFailoverResendThreshold int      `toml:"STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD"`
+	StreamResolverFailoverCooldownSec     float64  `toml:"STREAM_RESOLVER_FAILOVER_COOLDOWN"`
+	RecheckInactiveServersEnabled         bool     `toml:"RECHECK_INACTIVE_SERVERS_ENABLED"`
+	AutoDisableTimeoutServers             bool     `toml:"AUTO_DISABLE_TIMEOUT_SERVERS"`
+	AutoDisableTimeoutWindowSeconds       float64  `toml:"AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS"`
+	BaseEncodeData                        bool     `toml:"BASE_ENCODE_DATA"`
+	UploadCompressionType                 int      `toml:"UPLOAD_COMPRESSION_TYPE"`
+	DownloadCompressionType               int      `toml:"DOWNLOAD_COMPRESSION_TYPE"`
+	CompressionMinSize                    int      `toml:"COMPRESSION_MIN_SIZE"`
+	DataEncryptionMethod                  int      `toml:"DATA_ENCRYPTION_METHOD"`
+	EncryptionKey                         string   `toml:"ENCRYPTION_KEY"`
+	MinUploadMTU                          int      `toml:"MIN_UPLOAD_MTU"`
+	MinDownloadMTU                        int      `toml:"MIN_DOWNLOAD_MTU"`
+	MaxUploadMTU                          int      `toml:"MAX_UPLOAD_MTU"`
+	MaxDownloadMTU                        int      `toml:"MAX_DOWNLOAD_MTU"`
+	AutoRemoveLowMTUServers               bool     `toml:"AUTO_REMOVE_LOW_MTU_SERVERS"`
+	MTUTestRetries                        int      `toml:"MTU_TEST_RETRIES"`
+	MTUTestTimeout                        float64  `toml:"MTU_TEST_TIMEOUT"`
+	MTUTestParallelism                    int      `toml:"MTU_TEST_PARALLELISM"`
+	// MTUSearchTolerance stops the MTU binary search once the remaining range
+	// is this small, trading a few bytes of MTU for far fewer timed-out
+	// overshoot probes (the main startup cost).
+	MTUSearchTolerance int `toml:"MTU_SEARCH_TOLERANCE"`
+	// MTUBackgroundDiscovery starts the tunnel immediately from cached MTU
+	// values and re-discovers them in the background, hot-applying the result.
+	MTUBackgroundDiscovery bool `toml:"MTU_BACKGROUND_DISCOVERY"`
+	// MTUCacheTTLSeconds controls how long a cached MTU entry is trusted.
+	MTUCacheTTLSeconds                   float64 `toml:"MTU_CACHE_TTL_SECONDS"`
+	RX_TX_Workers                        int     `toml:"RX_TX_WORKERS"`
+	LegacyTunnelReaderWorkers            int     `toml:"TUNNEL_READER_WORKERS"`
+	LegacyTunnelWriterWorkers            int     `toml:"TUNNEL_WRITER_WORKERS"`
+	TunnelProcessWorkers                 int     `toml:"TUNNEL_PROCESS_WORKERS"`
+	TunnelPacketTimeoutSec               float64 `toml:"TUNNEL_PACKET_TIMEOUT_SECONDS"`
+	DispatcherIdlePollIntervalSeconds    float64 `toml:"DISPATCHER_IDLE_POLL_INTERVAL_SECONDS"`
+	PingAggressiveIntervalSeconds        float64 `toml:"PING_AGGRESSIVE_INTERVAL_SECONDS"`
+	PingLazyIntervalSeconds              float64 `toml:"PING_LAZY_INTERVAL_SECONDS"`
+	PingCooldownIntervalSeconds          float64 `toml:"PING_COOLDOWN_INTERVAL_SECONDS"`
+	PingColdIntervalSeconds              float64 `toml:"PING_COLD_INTERVAL_SECONDS"`
+	PingWarmThresholdSeconds             float64 `toml:"PING_WARM_THRESHOLD_SECONDS"`
+	PingCoolThresholdSeconds             float64 `toml:"PING_COOL_THRESHOLD_SECONDS"`
+	PingColdThresholdSeconds             float64 `toml:"PING_COLD_THRESHOLD_SECONDS"`
+	RXChannelSize                        int     `toml:"RX_CHANNEL_SIZE"`
+	DNSResponseFragmentTimeoutSeconds    float64 `toml:"DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS"`
+	SOCKSUDPAssociateReadTimeoutSeconds  float64 `toml:"SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS"`
+	ClientTerminalStreamRetentionSeconds float64 `toml:"CLIENT_TERMINAL_STREAM_RETENTION_SECONDS"`
+	ClientCancelledSetupRetentionSeconds float64 `toml:"CLIENT_CANCELLED_SETUP_RETENTION_SECONDS"`
+	SessionInitRetryBaseSeconds          float64 `toml:"SESSION_INIT_RETRY_BASE_SECONDS"`
+	SessionInitRetryStepSeconds          float64 `toml:"SESSION_INIT_RETRY_STEP_SECONDS"`
+	SessionInitRetryLinearAfter          int     `toml:"SESSION_INIT_RETRY_LINEAR_AFTER"`
+	SessionInitRetryMaxSeconds           float64 `toml:"SESSION_INIT_RETRY_MAX_SECONDS"`
+	SessionInitBusyRetryIntervalSeconds  float64 `toml:"SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS"`
+	SessionInitRacingCount               int     `toml:"SESSION_INIT_RACING_COUNT"`
+	SessionIdleRestartSeconds            float64 `toml:"SESSION_IDLE_RESTART_SECONDS"`
+	SaveMTUServersToFile                 bool    `toml:"SAVE_MTU_SERVERS_TO_FILE"`
+	MTUServersFileName                   string  `toml:"MTU_SERVERS_FILE_NAME"`
+	MTUServersFileFormat                 string  `toml:"MTU_SERVERS_FILE_FORMAT"`
+	MTUUsingSeparatorText                string  `toml:"MTU_USING_SECTION_SEPARATOR_TEXT"`
+	MTURemovedServerLogFormat            string  `toml:"MTU_REMOVED_SERVER_LOG_FORMAT"`
+	MTUAddedServerLogFormat              string  `toml:"MTU_ADDED_SERVER_LOG_FORMAT"`
+	MTUReactiveAddedServerLogFormat      string  `toml:"MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT"`
+	LogLevel                             string  `toml:"LOG_LEVEL"`
+	MaxPacketsPerBatch                   int     `toml:"MAX_PACKETS_PER_BATCH"`
+	ARQWindowSize                        int     `toml:"ARQ_WINDOW_SIZE"`
+	ARQInitialRTOSeconds                 float64 `toml:"ARQ_INITIAL_RTO_SECONDS"`
+	ARQMaxRTOSeconds                     float64 `toml:"ARQ_MAX_RTO_SECONDS"`
+	ARQControlInitialRTOSeconds          float64 `toml:"ARQ_CONTROL_INITIAL_RTO_SECONDS"`
+	ARQControlMaxRTOSeconds              float64 `toml:"ARQ_CONTROL_MAX_RTO_SECONDS"`
+	ARQMaxControlRetries                 int     `toml:"ARQ_MAX_CONTROL_RETRIES"`
+	ARQInactivityTimeoutSeconds          float64 `toml:"ARQ_INACTIVITY_TIMEOUT_SECONDS"`
+	ARQDataPacketTTLSeconds              float64 `toml:"ARQ_DATA_PACKET_TTL_SECONDS"`
+	ARQControlPacketTTLSeconds           float64 `toml:"ARQ_CONTROL_PACKET_TTL_SECONDS"`
+	ARQMaxDataRetries                    int     `toml:"ARQ_MAX_DATA_RETRIES"`
+	ARQDataNackMaxGap                    int     `toml:"ARQ_DATA_NACK_MAX_GAP"`
+	ARQDataNackInitialDelaySeconds       float64 `toml:"ARQ_DATA_NACK_INITIAL_DELAY_SECONDS"`
+	ARQDataNackRepeatSeconds             float64 `toml:"ARQ_DATA_NACK_REPEAT_SECONDS"`
+	ARQTerminalDrainTimeoutSec           float64 `toml:"ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS"`
+	ARQTerminalAckWaitTimeoutSec         float64 `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
+	// Download pump (client-only, not negotiated): use N dedicated resolvers to
+	// continuously send empty poll requests (pings) that pull queued download
+	// packets from the server, keeping DownloadPumpConcurrency requests in
+	// flight per resolver. 0 resolvers = disabled.
+	DownloadPumpResolvers        int               `toml:"DOWNLOAD_PUMP_RESOLVERS"`
+	DownloadPumpResolversPercent int               `toml:"DOWNLOAD_PUMP_RESOLVERS_PERCENT"`
+	DownloadPumpConcurrency      int               `toml:"DOWNLOAD_PUMP_CONCURRENCY"`
+	Resolvers                    []ResolverAddress `toml:"-"`
+	ResolverMap                  map[string]int    `toml:"-"`
 }
 
 type ClientConfigOverrides struct {
@@ -168,6 +185,9 @@ func defaultClientConfig() ClientConfig {
 		MTUTestRetries:                        2,
 		MTUTestTimeout:                        2.0,
 		MTUTestParallelism:                    16,
+		MTUSearchTolerance:                    32,
+		MTUBackgroundDiscovery:                true,
+		MTUCacheTTLSeconds:                    86400.0,
 		RX_TX_Workers:                         4,
 		TunnelProcessWorkers:                  0,
 		TunnelPacketTimeoutSec:                10.0,
@@ -190,6 +210,7 @@ func defaultClientConfig() ClientConfig {
 		SessionInitRetryMaxSeconds:            60.0,
 		SessionInitBusyRetryIntervalSeconds:   60.0,
 		SessionInitRacingCount:                3,
+		SessionIdleRestartSeconds:             90.0,
 		SaveMTUServersToFile:                  false,
 		MTUServersFileName:                    "masterdnsvpn_success_test_{time}.log",
 		MTUServersFileFormat:                  "{IP} ({DOMAIN}) - UP: {UP_MTU} DOWN: {DOWN-MTU}",
@@ -214,6 +235,9 @@ func defaultClientConfig() ClientConfig {
 		ARQDataNackRepeatSeconds:              1.0,
 		ARQTerminalDrainTimeoutSec:            120.0,
 		ARQTerminalAckWaitTimeoutSec:          90.0,
+		DownloadPumpResolvers:                 0,
+		DownloadPumpResolversPercent:          0,
+		DownloadPumpConcurrency:               4,
 	}
 }
 
@@ -412,6 +436,9 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.ARQDataNackRepeatSeconds = clampFloat(defaultFloatAtMostZero(cfg.ARQDataNackRepeatSeconds, 1.0), 0.01, 60.0)
 	cfg.ARQTerminalDrainTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.ARQTerminalDrainTimeoutSec, 120.0), 10.0, 3600.0)
 	cfg.ARQTerminalAckWaitTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.ARQTerminalAckWaitTimeoutSec, 90.0), 5.0, 3600.0)
+	cfg.DownloadPumpResolvers = clampInt(cfg.DownloadPumpResolvers, 0, 16)
+	cfg.DownloadPumpResolversPercent = clampInt(cfg.DownloadPumpResolversPercent, 0, 100)
+	cfg.DownloadPumpConcurrency = clampInt(cfg.DownloadPumpConcurrency, 1, 64)
 
 	if cfg.MinUploadMTU < 0 || cfg.MinDownloadMTU < 0 || cfg.MaxUploadMTU < 0 || cfg.MaxDownloadMTU < 0 {
 		return cfg, fmt.Errorf("mtu values cannot be negative")
@@ -428,6 +455,8 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUTestRetries = defaultIntBelow(cfg.MTUTestRetries, 1, 1)
 	cfg.MTUTestTimeout = defaultFloatAtMostZero(cfg.MTUTestTimeout, 2.0)
 	cfg.MTUTestParallelism = defaultIntBelow(cfg.MTUTestParallelism, 1, 1)
+	cfg.MTUSearchTolerance = clampInt(defaultIntBelow(cfg.MTUSearchTolerance, 1, 32), 1, 512)
+	cfg.MTUCacheTTLSeconds = clampFloat(defaultFloatAtMostZero(cfg.MTUCacheTTLSeconds, 86400.0), 0.0, 2592000.0)
 	legacyRX_TX_Workers := max(cfg.LegacyTunnelReaderWorkers, cfg.LegacyTunnelWriterWorkers)
 	if !cfg.explicitRX_TX_Workers && legacyRX_TX_Workers > 0 {
 		cfg.RX_TX_Workers = legacyRX_TX_Workers
@@ -460,6 +489,7 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.SessionInitRetryMaxSeconds = clampFloat(defaultFloatAtMostZero(cfg.SessionInitRetryMaxSeconds, 60.0), cfg.SessionInitRetryBaseSeconds, 3600.0)
 	cfg.SessionInitBusyRetryIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.SessionInitBusyRetryIntervalSeconds, 60.0), 1.0, 3600.0)
 	cfg.SessionInitRacingCount = clampInt(defaultIntBelow(cfg.SessionInitRacingCount, 1, 3), 1, 5)
+	cfg.SessionIdleRestartSeconds = clampFloat(defaultFloatAtMostZero(cfg.SessionIdleRestartSeconds, 90.0), 5.0, 3600.0)
 	cfg.MTUServersFileName = strings.TrimSpace(cfg.MTUServersFileName)
 	cfg.MTUServersFileFormat = strings.TrimSpace(cfg.MTUServersFileFormat)
 	cfg.MTUUsingSeparatorText = strings.TrimSpace(cfg.MTUUsingSeparatorText)
@@ -503,6 +533,20 @@ func (c ClientConfig) ResolversPath() string {
 
 func (c ClientConfig) LocalDNSCachePath() string {
 	return filepath.Join(c.ConfigDir, "local_dns_cache.bin")
+}
+
+// MTUCachePath stores the last discovered upload/download MTU per resolver so a
+// reconnect can start immediately without waiting for a full MTU scan.
+func (c ClientConfig) MTUCachePath() string {
+	return filepath.Join(filepath.Dir(c.ResolversPath()), "client_mtu_cache.json")
+}
+
+// MTUCacheTTL is how long a cached MTU entry stays trusted. Zero disables expiry.
+func (c ClientConfig) MTUCacheTTL() time.Duration {
+	if c.MTUCacheTTLSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(c.MTUCacheTTLSeconds * float64(time.Second))
 }
 
 func normalizeClientDomains(domains []string) []string {
@@ -583,6 +627,13 @@ func (c ClientConfig) PingCoolThreshold() time.Duration {
 
 func (c ClientConfig) PingColdThreshold() time.Duration {
 	return time.Duration(c.PingColdThresholdSeconds * float64(time.Second))
+}
+
+// SessionIdleRestart is how long the ready session may go without any inbound
+// tunnel packet before the client tears it down and re-initializes. This is the
+// self-healing path for Doze/network loss, where no inbound traffic can arrive.
+func (c ClientConfig) SessionIdleRestart() time.Duration {
+	return time.Duration(c.SessionIdleRestartSeconds * float64(time.Second))
 }
 
 func (c ClientConfig) DNSResponseFragmentTimeout() time.Duration {

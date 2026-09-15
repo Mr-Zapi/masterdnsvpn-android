@@ -283,6 +283,39 @@ func (c *Client) clearRuntimeResetRequest() {
 	}
 }
 
+// touchInbound records the last time any inbound tunnel packet was processed.
+func (c *Client) touchInbound() {
+	if c == nil {
+		return
+	}
+	c.lastInboundNano.Store(time.Now().UnixNano())
+}
+
+// NotifyNetworkChanged asks the running session to re-initialize. It is called
+// by the Android layer when the underlying network appears/changes, so the
+// tunnel recovers immediately instead of waiting for the idle watchdog.
+func (c *Client) NotifyNetworkChanged() {
+	if c == nil {
+		return
+	}
+	c.requestSessionRestart("network changed")
+}
+
+// sessionInactive reports whether the ready session has gone too long without
+// any inbound traffic. That means the tunnel is silently dead (Doze, network
+// loss, changed route, ...) even though the process is still alive, so the
+// session must be rebuilt to bind fresh sockets and get a new session.
+func (c *Client) sessionInactive(now time.Time) bool {
+	if c == nil || !c.sessionReady || c.sessionIdleRestart <= 0 {
+		return false
+	}
+	last := c.lastInboundNano.Load()
+	if last <= 0 {
+		return false
+	}
+	return now.Sub(time.Unix(0, last)) > c.sessionIdleRestart
+}
+
 // StartAsyncRuntime initializes the parallel system for tunnel I/O and processing.
 func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	// 1. Ensure any previous instance is completely stopped.
@@ -345,6 +378,15 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 			return err
 		}
 	}
+
+	// The proxy listener(s) are accepting connections now; let any waiting
+	// caller (Android tun2socks bridge) start forwarding traffic.
+	c.signalReady()
+
+	// Optional dedicated download pullers: open empty poll requests on a few
+	// resolvers to pull queued download fragments in parallel with the normal
+	// ACK-driven flow.
+	c.startDownloadPumps(runtimeCtx)
 
 	// 6. Spawn Reader Workers (High-speed ingestion)
 	for i := 0; i < c.tunnelRX_TX_Workers; i++ {
@@ -877,6 +919,10 @@ func (c *Client) asyncProcessorWorker(ctx context.Context, id int) {
 // handleInboundPacket is the central entry point for all received tunnel packets.
 func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr string) {
 	// c.log.Debugf("Inbound packet from %v (%d bytes)", addr, len(data))
+
+	// Any datagram reaching the tunnel sockets means the network path is alive;
+	// reset the session idle watchdog.
+	c.touchInbound()
 
 	// 1. Extract VPN Packet from DNS Response
 	vpnPacket, err := DnsParser.ExtractVPNResponse(data, c.responseMode == mtuProbeBase64Reply)
