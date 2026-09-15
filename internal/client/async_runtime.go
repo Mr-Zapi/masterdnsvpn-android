@@ -420,6 +420,9 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	c.asyncWG.Add(1)
 	go c.asyncStreamCleanupWorker(runtimeCtx)
 
+	// 10. Dedicated download pullers (no-op when disabled in config).
+	c.startDownloadPumps(runtimeCtx)
+
 	started = true
 	return nil
 }

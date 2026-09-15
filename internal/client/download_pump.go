@@ -18,6 +18,10 @@
 // (handleInboundPacket), so ARQ, stream reassembly, ACK generation and the
 // balancer's resolver statistics all keep working unchanged. This does not
 // change the wire protocol.
+//
+// Because the pump owns its own UDP sockets it never touches the dispatcher,
+// planner or writer stages, so polling no longer competes with upstream data
+// for the shared transmit pipeline.
 // ==============================================================================
 package client
 
@@ -39,6 +43,9 @@ const (
 	// downloadPumpReadTimeout bounds a single poll. It also bounds how long
 	// shutdown can wait on an in-flight poll.
 	downloadPumpReadTimeout = 1500 * time.Millisecond
+	// downloadPumpSelectInterval throttles re-sorting the active resolver set
+	// while pumps are polling.
+	downloadPumpSelectInterval = time.Second
 )
 
 type downloadPump struct {
@@ -155,10 +162,6 @@ func (c *Client) runDownloadPumpReporter(ctx context.Context) {
 		}
 	}
 }
-
-// downloadPumpSelectInterval throttles re-sorting the active resolver set while
-// pumps are polling.
-const downloadPumpSelectInterval = time.Second
 
 // downloadPumpConnections picks the best active resolvers for pumping: highest
 // download MTU first, then lowest resolve time. The result is cached briefly so

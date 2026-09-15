@@ -67,72 +67,78 @@ type ClientConfig struct {
 	MTUTestTimeout                        float64  `toml:"MTU_TEST_TIMEOUT"`
 	MTUTestParallelism                    int      `toml:"MTU_TEST_PARALLELISM"`
 	// MTUSearchTolerance stops the MTU binary search once the remaining range
-	// is this small, trading a few bytes of MTU for far fewer timed-out
-	// overshoot probes (the main startup cost).
+	// is this small. An overshoot probe can only fail by timing out, so each
+	// one costs a full MTU_TEST_TIMEOUT and those timeouts dominate startup;
+	// this trades a few bytes of MTU for far fewer of them.
 	MTUSearchTolerance int `toml:"MTU_SEARCH_TOLERANCE"`
 	// MTUBackgroundDiscovery starts the tunnel immediately from cached MTU
 	// values and re-discovers them in the background, hot-applying the result.
 	MTUBackgroundDiscovery bool `toml:"MTU_BACKGROUND_DISCOVERY"`
 	// MTUCacheTTLSeconds controls how long a cached MTU entry is trusted.
-	MTUCacheTTLSeconds                   float64 `toml:"MTU_CACHE_TTL_SECONDS"`
-	RX_TX_Workers                        int     `toml:"RX_TX_WORKERS"`
-	LegacyTunnelReaderWorkers            int     `toml:"TUNNEL_READER_WORKERS"`
-	LegacyTunnelWriterWorkers            int     `toml:"TUNNEL_WRITER_WORKERS"`
-	TunnelProcessWorkers                 int     `toml:"TUNNEL_PROCESS_WORKERS"`
-	TunnelPacketTimeoutSec               float64 `toml:"TUNNEL_PACKET_TIMEOUT_SECONDS"`
-	DispatcherIdlePollIntervalSeconds    float64 `toml:"DISPATCHER_IDLE_POLL_INTERVAL_SECONDS"`
-	PingAggressiveIntervalSeconds        float64 `toml:"PING_AGGRESSIVE_INTERVAL_SECONDS"`
-	PingLazyIntervalSeconds              float64 `toml:"PING_LAZY_INTERVAL_SECONDS"`
-	PingCooldownIntervalSeconds          float64 `toml:"PING_COOLDOWN_INTERVAL_SECONDS"`
-	PingColdIntervalSeconds              float64 `toml:"PING_COLD_INTERVAL_SECONDS"`
-	PingWarmThresholdSeconds             float64 `toml:"PING_WARM_THRESHOLD_SECONDS"`
-	PingCoolThresholdSeconds             float64 `toml:"PING_COOL_THRESHOLD_SECONDS"`
-	PingColdThresholdSeconds             float64 `toml:"PING_COLD_THRESHOLD_SECONDS"`
-	RXChannelSize                        int     `toml:"RX_CHANNEL_SIZE"`
-	DNSResponseFragmentTimeoutSeconds    float64 `toml:"DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS"`
-	SOCKSUDPAssociateReadTimeoutSeconds  float64 `toml:"SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS"`
-	ClientTerminalStreamRetentionSeconds float64 `toml:"CLIENT_TERMINAL_STREAM_RETENTION_SECONDS"`
-	ClientCancelledSetupRetentionSeconds float64 `toml:"CLIENT_CANCELLED_SETUP_RETENTION_SECONDS"`
-	SessionInitRetryBaseSeconds          float64 `toml:"SESSION_INIT_RETRY_BASE_SECONDS"`
-	SessionInitRetryStepSeconds          float64 `toml:"SESSION_INIT_RETRY_STEP_SECONDS"`
-	SessionInitRetryLinearAfter          int     `toml:"SESSION_INIT_RETRY_LINEAR_AFTER"`
-	SessionInitRetryMaxSeconds           float64 `toml:"SESSION_INIT_RETRY_MAX_SECONDS"`
-	SessionInitBusyRetryIntervalSeconds  float64 `toml:"SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS"`
-	SessionInitRacingCount               int     `toml:"SESSION_INIT_RACING_COUNT"`
-	SessionIdleRestartSeconds            float64 `toml:"SESSION_IDLE_RESTART_SECONDS"`
-	SaveMTUServersToFile                 bool    `toml:"SAVE_MTU_SERVERS_TO_FILE"`
-	MTUServersFileName                   string  `toml:"MTU_SERVERS_FILE_NAME"`
-	MTUServersFileFormat                 string  `toml:"MTU_SERVERS_FILE_FORMAT"`
-	MTUUsingSeparatorText                string  `toml:"MTU_USING_SECTION_SEPARATOR_TEXT"`
-	MTURemovedServerLogFormat            string  `toml:"MTU_REMOVED_SERVER_LOG_FORMAT"`
-	MTUAddedServerLogFormat              string  `toml:"MTU_ADDED_SERVER_LOG_FORMAT"`
-	MTUReactiveAddedServerLogFormat      string  `toml:"MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT"`
-	LogLevel                             string  `toml:"LOG_LEVEL"`
-	MaxPacketsPerBatch                   int     `toml:"MAX_PACKETS_PER_BATCH"`
-	ARQWindowSize                        int     `toml:"ARQ_WINDOW_SIZE"`
-	ARQInitialRTOSeconds                 float64 `toml:"ARQ_INITIAL_RTO_SECONDS"`
-	ARQMaxRTOSeconds                     float64 `toml:"ARQ_MAX_RTO_SECONDS"`
-	ARQControlInitialRTOSeconds          float64 `toml:"ARQ_CONTROL_INITIAL_RTO_SECONDS"`
-	ARQControlMaxRTOSeconds              float64 `toml:"ARQ_CONTROL_MAX_RTO_SECONDS"`
-	ARQMaxControlRetries                 int     `toml:"ARQ_MAX_CONTROL_RETRIES"`
-	ARQInactivityTimeoutSeconds          float64 `toml:"ARQ_INACTIVITY_TIMEOUT_SECONDS"`
-	ARQDataPacketTTLSeconds              float64 `toml:"ARQ_DATA_PACKET_TTL_SECONDS"`
-	ARQControlPacketTTLSeconds           float64 `toml:"ARQ_CONTROL_PACKET_TTL_SECONDS"`
-	ARQMaxDataRetries                    int     `toml:"ARQ_MAX_DATA_RETRIES"`
-	ARQDataNackMaxGap                    int     `toml:"ARQ_DATA_NACK_MAX_GAP"`
-	ARQDataNackInitialDelaySeconds       float64 `toml:"ARQ_DATA_NACK_INITIAL_DELAY_SECONDS"`
-	ARQDataNackRepeatSeconds             float64 `toml:"ARQ_DATA_NACK_REPEAT_SECONDS"`
-	ARQTerminalDrainTimeoutSec           float64 `toml:"ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS"`
-	ARQTerminalAckWaitTimeoutSec         float64 `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
-	// Download pump (client-only, not negotiated): use N dedicated resolvers to
-	// continuously send empty poll requests (pings) that pull queued download
+	MTUCacheTTLSeconds float64 `toml:"MTU_CACHE_TTL_SECONDS"`
+	// Download pump (client-only, not negotiated): dedicate N resolvers to
+	// continuously sending empty poll requests that pull queued download
 	// packets from the server, keeping DownloadPumpConcurrency requests in
-	// flight per resolver. 0 resolvers = disabled.
-	DownloadPumpResolvers        int               `toml:"DOWNLOAD_PUMP_RESOLVERS"`
-	DownloadPumpResolversPercent int               `toml:"DOWNLOAD_PUMP_RESOLVERS_PERCENT"`
-	DownloadPumpConcurrency      int               `toml:"DOWNLOAD_PUMP_CONCURRENCY"`
-	Resolvers                    []ResolverAddress `toml:"-"`
-	ResolverMap                  map[string]int    `toml:"-"`
+	// flight per resolver. The pump owns its own UDP sockets, so these polls
+	// never compete with upstream data for the shared transmit pipeline.
+	// 0 resolvers = disabled.
+	DownloadPumpResolvers                int               `toml:"DOWNLOAD_PUMP_RESOLVERS"`
+	DownloadPumpResolversPercent         int               `toml:"DOWNLOAD_PUMP_RESOLVERS_PERCENT"`
+	DownloadPumpConcurrency              int               `toml:"DOWNLOAD_PUMP_CONCURRENCY"`
+	RX_TX_Workers                        int               `toml:"RX_TX_WORKERS"`
+	LegacyTunnelReaderWorkers            int               `toml:"TUNNEL_READER_WORKERS"`
+	LegacyTunnelWriterWorkers            int               `toml:"TUNNEL_WRITER_WORKERS"`
+	TunnelProcessWorkers                 int               `toml:"TUNNEL_PROCESS_WORKERS"`
+	TunnelPacketTimeoutSec               float64           `toml:"TUNNEL_PACKET_TIMEOUT_SECONDS"`
+	DispatcherIdlePollIntervalSeconds    float64           `toml:"DISPATCHER_IDLE_POLL_INTERVAL_SECONDS"`
+	PingAggressiveIntervalSeconds        float64           `toml:"PING_AGGRESSIVE_INTERVAL_SECONDS"`
+	PingLazyIntervalSeconds              float64           `toml:"PING_LAZY_INTERVAL_SECONDS"`
+	PingCooldownIntervalSeconds          float64           `toml:"PING_COOLDOWN_INTERVAL_SECONDS"`
+	PingColdIntervalSeconds              float64           `toml:"PING_COLD_INTERVAL_SECONDS"`
+	PingWarmThresholdSeconds             float64           `toml:"PING_WARM_THRESHOLD_SECONDS"`
+	PingCoolThresholdSeconds             float64           `toml:"PING_COOL_THRESHOLD_SECONDS"`
+	PingColdThresholdSeconds             float64           `toml:"PING_COLD_THRESHOLD_SECONDS"`
+	PingInflightTarget                   int               `toml:"PING_INFLIGHT_TARGET"`
+	PingInflightMin                      int               `toml:"PING_INFLIGHT_MIN"`
+	PingInflightAdaptive                 bool              `toml:"PING_INFLIGHT_ADAPTIVE"`
+	RXChannelSize                        int               `toml:"RX_CHANNEL_SIZE"`
+	DNSResponseFragmentTimeoutSeconds    float64           `toml:"DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS"`
+	SOCKSUDPAssociateReadTimeoutSeconds  float64           `toml:"SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS"`
+	ClientTerminalStreamRetentionSeconds float64           `toml:"CLIENT_TERMINAL_STREAM_RETENTION_SECONDS"`
+	ClientCancelledSetupRetentionSeconds float64           `toml:"CLIENT_CANCELLED_SETUP_RETENTION_SECONDS"`
+	SessionInitRetryBaseSeconds          float64           `toml:"SESSION_INIT_RETRY_BASE_SECONDS"`
+	SessionInitRetryStepSeconds          float64           `toml:"SESSION_INIT_RETRY_STEP_SECONDS"`
+	SessionInitRetryLinearAfter          int               `toml:"SESSION_INIT_RETRY_LINEAR_AFTER"`
+	SessionInitRetryMaxSeconds           float64           `toml:"SESSION_INIT_RETRY_MAX_SECONDS"`
+	SessionInitBusyRetryIntervalSeconds  float64           `toml:"SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS"`
+	SessionInitRacingCount               int               `toml:"SESSION_INIT_RACING_COUNT"`
+	SessionIdleRestartSeconds            float64           `toml:"SESSION_IDLE_RESTART_SECONDS"`
+	SaveMTUServersToFile                 bool              `toml:"SAVE_MTU_SERVERS_TO_FILE"`
+	MTUServersFileName                   string            `toml:"MTU_SERVERS_FILE_NAME"`
+	MTUServersFileFormat                 string            `toml:"MTU_SERVERS_FILE_FORMAT"`
+	MTUUsingSeparatorText                string            `toml:"MTU_USING_SECTION_SEPARATOR_TEXT"`
+	MTURemovedServerLogFormat            string            `toml:"MTU_REMOVED_SERVER_LOG_FORMAT"`
+	MTUAddedServerLogFormat              string            `toml:"MTU_ADDED_SERVER_LOG_FORMAT"`
+	MTUReactiveAddedServerLogFormat      string            `toml:"MTU_REACTIVE_ADDED_SERVER_LOG_FORMAT"`
+	LogLevel                             string            `toml:"LOG_LEVEL"`
+	MaxPacketsPerBatch                   int               `toml:"MAX_PACKETS_PER_BATCH"`
+	ARQWindowSize                        int               `toml:"ARQ_WINDOW_SIZE"`
+	ARQInitialRTOSeconds                 float64           `toml:"ARQ_INITIAL_RTO_SECONDS"`
+	ARQMaxRTOSeconds                     float64           `toml:"ARQ_MAX_RTO_SECONDS"`
+	ARQControlInitialRTOSeconds          float64           `toml:"ARQ_CONTROL_INITIAL_RTO_SECONDS"`
+	ARQControlMaxRTOSeconds              float64           `toml:"ARQ_CONTROL_MAX_RTO_SECONDS"`
+	ARQMaxControlRetries                 int               `toml:"ARQ_MAX_CONTROL_RETRIES"`
+	ARQInactivityTimeoutSeconds          float64           `toml:"ARQ_INACTIVITY_TIMEOUT_SECONDS"`
+	ARQDataPacketTTLSeconds              float64           `toml:"ARQ_DATA_PACKET_TTL_SECONDS"`
+	ARQControlPacketTTLSeconds           float64           `toml:"ARQ_CONTROL_PACKET_TTL_SECONDS"`
+	ARQMaxDataRetries                    int               `toml:"ARQ_MAX_DATA_RETRIES"`
+	ARQDataNackMaxGap                    int               `toml:"ARQ_DATA_NACK_MAX_GAP"`
+	ARQDataNackInitialDelaySeconds       float64           `toml:"ARQ_DATA_NACK_INITIAL_DELAY_SECONDS"`
+	ARQDataNackRepeatSeconds             float64           `toml:"ARQ_DATA_NACK_REPEAT_SECONDS"`
+	ARQTerminalDrainTimeoutSec           float64           `toml:"ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS"`
+	ARQTerminalAckWaitTimeoutSec         float64           `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
+	Resolvers                            []ResolverAddress `toml:"-"`
+	ResolverMap                          map[string]int    `toml:"-"`
 }
 
 type ClientConfigOverrides struct {
@@ -180,64 +186,71 @@ func defaultClientConfig() ClientConfig {
 		MinUploadMTU:                          38,
 		MinDownloadMTU:                        100,
 		MaxUploadMTU:                          150,
-		MaxDownloadMTU:                        500,
-		AutoRemoveLowMTUServers:               true,
-		MTUTestRetries:                        2,
-		MTUTestTimeout:                        2.0,
-		MTUTestParallelism:                    16,
-		MTUSearchTolerance:                    32,
-		MTUBackgroundDiscovery:                true,
-		MTUCacheTTLSeconds:                    86400.0,
-		RX_TX_Workers:                         4,
-		TunnelProcessWorkers:                  0,
-		TunnelPacketTimeoutSec:                10.0,
-		DispatcherIdlePollIntervalSeconds:     0.020,
-		PingAggressiveIntervalSeconds:         0.100,
-		PingLazyIntervalSeconds:               0.750,
-		PingCooldownIntervalSeconds:           2.0,
-		PingColdIntervalSeconds:               15.0,
-		PingWarmThresholdSeconds:              8.0,
-		PingCoolThresholdSeconds:              20.0,
-		PingColdThresholdSeconds:              30.0,
-		RXChannelSize:                         4096,
-		DNSResponseFragmentTimeoutSeconds:     60.0,
-		SOCKSUDPAssociateReadTimeoutSeconds:   30.0,
-		ClientTerminalStreamRetentionSeconds:  45.0,
-		ClientCancelledSetupRetentionSeconds:  120.0,
-		SessionInitRetryBaseSeconds:           1.0,
-		SessionInitRetryStepSeconds:           1.0,
-		SessionInitRetryLinearAfter:           5,
-		SessionInitRetryMaxSeconds:            60.0,
-		SessionInitBusyRetryIntervalSeconds:   60.0,
-		SessionInitRacingCount:                3,
-		SessionIdleRestartSeconds:             90.0,
-		SaveMTUServersToFile:                  false,
-		MTUServersFileName:                    "masterdnsvpn_success_test_{time}.log",
-		MTUServersFileFormat:                  "{IP} ({DOMAIN}) - UP: {UP_MTU} DOWN: {DOWN-MTU}",
-		MTUUsingSeparatorText:                 "",
-		MTURemovedServerLogFormat:             "Resolver {IP} ({DOMAIN}) removed at {TIME} due to {CAUSE}",
-		MTUAddedServerLogFormat:               "Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})",
-		MTUReactiveAddedServerLogFormat:       "Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})",
-		LogLevel:                              "INFO",
-		MaxPacketsPerBatch:                    8,
-		ARQWindowSize:                         600,
-		ARQInitialRTOSeconds:                  1.0,
-		ARQMaxRTOSeconds:                      5.0,
-		ARQControlInitialRTOSeconds:           0.5,
-		ARQControlMaxRTOSeconds:               3.0,
-		ARQMaxControlRetries:                  400,
-		ARQInactivityTimeoutSeconds:           1800.0,
-		ARQDataPacketTTLSeconds:               2400.0,
-		ARQControlPacketTTLSeconds:            1200.0,
-		ARQMaxDataRetries:                     1200,
-		ARQDataNackMaxGap:                     16,
-		ARQDataNackInitialDelaySeconds:        0.1,
-		ARQDataNackRepeatSeconds:              1.0,
-		ARQTerminalDrainTimeoutSec:            120.0,
-		ARQTerminalAckWaitTimeoutSec:          90.0,
-		DownloadPumpResolvers:                 0,
-		DownloadPumpResolversPercent:          0,
-		DownloadPumpConcurrency:               4,
+		// The download MTU is found by binary search bounded by this value, so a
+		// low default silently caps throughput: every answer carries at most this
+		// many bytes. 500 left clients ~7x slower than the 3603 a normal path
+		// negotiates, and only configs that overrode it ever went faster.
+		MaxDownloadMTU:                       4000,
+		AutoRemoveLowMTUServers:              true,
+		MTUTestRetries:                       2,
+		MTUTestTimeout:                       2.0,
+		MTUTestParallelism:                   16,
+		MTUSearchTolerance:                   32,
+		DownloadPumpResolvers:                0,
+		DownloadPumpResolversPercent:         25,
+		DownloadPumpConcurrency:              6,
+		MTUBackgroundDiscovery:               true,
+		MTUCacheTTLSeconds:                   86400.0,
+		RX_TX_Workers:                        4,
+		TunnelProcessWorkers:                 0,
+		TunnelPacketTimeoutSec:               10.0,
+		DispatcherIdlePollIntervalSeconds:    0.020,
+		PingAggressiveIntervalSeconds:        0.100,
+		PingLazyIntervalSeconds:              0.750,
+		PingCooldownIntervalSeconds:          2.0,
+		PingColdIntervalSeconds:              15.0,
+		PingWarmThresholdSeconds:             8.0,
+		PingCoolThresholdSeconds:             20.0,
+		PingColdThresholdSeconds:             30.0,
+		PingInflightTarget:                   128,
+		PingInflightMin:                      16,
+		PingInflightAdaptive:                 true,
+		RXChannelSize:                        4096,
+		DNSResponseFragmentTimeoutSeconds:    60.0,
+		SOCKSUDPAssociateReadTimeoutSeconds:  30.0,
+		ClientTerminalStreamRetentionSeconds: 45.0,
+		ClientCancelledSetupRetentionSeconds: 120.0,
+		SessionInitRetryBaseSeconds:          1.0,
+		SessionInitRetryStepSeconds:          1.0,
+		SessionInitRetryLinearAfter:          5,
+		SessionInitRetryMaxSeconds:           60.0,
+		SessionInitBusyRetryIntervalSeconds:  60.0,
+		SessionInitRacingCount:               3,
+		SessionIdleRestartSeconds:            90.0,
+		SaveMTUServersToFile:                 false,
+		MTUServersFileName:                   "masterdnsvpn_success_test_{time}.log",
+		MTUServersFileFormat:                 "{IP} ({DOMAIN}) - UP: {UP_MTU} DOWN: {DOWN-MTU}",
+		MTUUsingSeparatorText:                "",
+		MTURemovedServerLogFormat:            "Resolver {IP} ({DOMAIN}) removed at {TIME} due to {CAUSE}",
+		MTUAddedServerLogFormat:              "Resolver {IP} ({DOMAIN}) added back at {TIME} (UP {UP_MTU}, DOWN {DOWN_MTU})",
+		MTUReactiveAddedServerLogFormat:      "Resolver {IP} ({DOMAIN}) added back at {TIME} after reactive recheck (UP {UP_MTU}, DOWN {DOWN_MTU})",
+		LogLevel:                             "INFO",
+		MaxPacketsPerBatch:                   8,
+		ARQWindowSize:                        600,
+		ARQInitialRTOSeconds:                 1.0,
+		ARQMaxRTOSeconds:                     5.0,
+		ARQControlInitialRTOSeconds:          0.5,
+		ARQControlMaxRTOSeconds:              3.0,
+		ARQMaxControlRetries:                 400,
+		ARQInactivityTimeoutSeconds:          1800.0,
+		ARQDataPacketTTLSeconds:              2400.0,
+		ARQControlPacketTTLSeconds:           1200.0,
+		ARQMaxDataRetries:                    1200,
+		ARQDataNackMaxGap:                    16,
+		ARQDataNackInitialDelaySeconds:       0.1,
+		ARQDataNackRepeatSeconds:             1.0,
+		ARQTerminalDrainTimeoutSec:           120.0,
+		ARQTerminalAckWaitTimeoutSec:         90.0,
 	}
 }
 
@@ -436,10 +449,6 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.ARQDataNackRepeatSeconds = clampFloat(defaultFloatAtMostZero(cfg.ARQDataNackRepeatSeconds, 1.0), 0.01, 60.0)
 	cfg.ARQTerminalDrainTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.ARQTerminalDrainTimeoutSec, 120.0), 10.0, 3600.0)
 	cfg.ARQTerminalAckWaitTimeoutSec = clampFloat(defaultFloatAtMostZero(cfg.ARQTerminalAckWaitTimeoutSec, 90.0), 5.0, 3600.0)
-	cfg.DownloadPumpResolvers = clampInt(cfg.DownloadPumpResolvers, 0, 16)
-	cfg.DownloadPumpResolversPercent = clampInt(cfg.DownloadPumpResolversPercent, 0, 100)
-	cfg.DownloadPumpConcurrency = clampInt(cfg.DownloadPumpConcurrency, 1, 64)
-
 	if cfg.MinUploadMTU < 0 || cfg.MinDownloadMTU < 0 || cfg.MaxUploadMTU < 0 || cfg.MaxDownloadMTU < 0 {
 		return cfg, fmt.Errorf("mtu values cannot be negative")
 	}
@@ -456,6 +465,9 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUTestTimeout = defaultFloatAtMostZero(cfg.MTUTestTimeout, 2.0)
 	cfg.MTUTestParallelism = defaultIntBelow(cfg.MTUTestParallelism, 1, 1)
 	cfg.MTUSearchTolerance = clampInt(defaultIntBelow(cfg.MTUSearchTolerance, 1, 32), 1, 512)
+	cfg.DownloadPumpResolvers = clampInt(cfg.DownloadPumpResolvers, 0, 64)
+	cfg.DownloadPumpResolversPercent = clampInt(cfg.DownloadPumpResolversPercent, 0, 100)
+	cfg.DownloadPumpConcurrency = clampInt(defaultIntBelow(cfg.DownloadPumpConcurrency, 1, 6), 1, 64)
 	cfg.MTUCacheTTLSeconds = clampFloat(defaultFloatAtMostZero(cfg.MTUCacheTTLSeconds, 86400.0), 0.0, 2592000.0)
 	legacyRX_TX_Workers := max(cfg.LegacyTunnelReaderWorkers, cfg.LegacyTunnelWriterWorkers)
 	if !cfg.explicitRX_TX_Workers && legacyRX_TX_Workers > 0 {
@@ -478,6 +490,8 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.PingWarmThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingWarmThresholdSeconds, 8.0), 0.1, 600.0)
 	cfg.PingCoolThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingCoolThresholdSeconds, 20.0), cfg.PingWarmThresholdSeconds, 1800.0)
 	cfg.PingColdThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingColdThresholdSeconds, 30.0), cfg.PingCoolThresholdSeconds, 3600.0)
+	cfg.PingInflightTarget = clampInt(defaultIntBelow(cfg.PingInflightTarget, 1, 1), 1, 512)
+	cfg.PingInflightMin = clampInt(defaultIntBelow(cfg.PingInflightMin, 1, 16), 1, cfg.PingInflightTarget)
 	cfg.RXChannelSize = clampInt(defaultIntBelow(cfg.RXChannelSize, 1, 4096), 64, 65536)
 	cfg.DNSResponseFragmentTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.DNSResponseFragmentTimeoutSeconds, 60.0), 1.0, 600.0)
 	cfg.SOCKSUDPAssociateReadTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.SOCKSUDPAssociateReadTimeoutSeconds, 30.0), 1.0, 3600.0)
