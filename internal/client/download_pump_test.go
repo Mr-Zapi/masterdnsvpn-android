@@ -120,7 +120,7 @@ func TestDownlinkPumpMaintainRampsTarget(t *testing.T) {
 	for _, s := range pump.states {
 		state = s
 	}
-	state.lastResp = time.Now()
+	state.lastDataResp = time.Now()
 	state.target = 2
 	pump.mu.Unlock()
 
@@ -131,5 +131,39 @@ func TestDownlinkPumpMaintainRampsTarget(t *testing.T) {
 	pump.mu.Unlock()
 	if target != 3 {
 		t.Fatalf("expected target to ramp from 2 to 3, got %d", target)
+	}
+}
+
+func TestDownlinkPumpMaintainDoesNotRampOnPong(t *testing.T) {
+	pump, _ := newTestDownlinkPump(t, 25)
+
+	pump.mu.Lock()
+	var state *downlinkPumpState
+	for _, s := range pump.states {
+		state = s
+	}
+	state.lastResp = time.Now()
+	state.target = 2
+	pump.mu.Unlock()
+
+	pump.maintain(time.Now())
+
+	pump.mu.Lock()
+	target := state.target
+	pump.mu.Unlock()
+	if target != 2 {
+		t.Fatalf("expected target to stay at 2 on PONG-only traffic, got %d", target)
+	}
+}
+
+func TestDownlinkPumpGlobalInFlightCap(t *testing.T) {
+	pump, _ := newTestDownlinkPump(t, 25)
+
+	pump.mu.Lock()
+	pump.inflightTotal = downloadPumpMaxInFlightTotal
+	pump.mu.Unlock()
+
+	if got := pump.reserve(time.Now()); got != nil {
+		t.Fatal("expected reservation to be rejected at the global in-flight cap")
 	}
 }

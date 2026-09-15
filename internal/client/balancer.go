@@ -852,8 +852,10 @@ func (b *Balancer) GetBestConnectionExcluding(excludeKey string) (Connection, bo
 
 	switch b.strategy {
 	case BalancingRandom:
-		ordered := b.rotatedActiveIndicesLocked(1)
-		for _, idx := range ordered {
+		n := len(b.uplinkActiveIDs)
+		start := b.rotatedStartLocked(1)
+		for i := 0; i < n; i++ {
+			idx := b.uplinkActiveIDs[(start+i)%n]
 			if b.connections[idx].Key == excludeKey {
 				continue
 			}
@@ -1733,8 +1735,10 @@ func (b *Balancer) selectTargetByStrategyLocked() (Connection, bool) {
 func (b *Balancer) getBestConnectionExcludingLocked(excludeKey string) (Connection, bool) {
 	switch b.strategy {
 	case BalancingRandom:
-		ordered := b.rotatedActiveIndicesLocked(1)
-		for _, idx := range ordered {
+		n := len(b.uplinkActiveIDs)
+		start := b.rotatedStartLocked(1)
+		for i := 0; i < n; i++ {
+			idx := b.uplinkActiveIDs[(start+i)%n]
 			if b.connections[idx].Key == excludeKey {
 				continue
 			}
@@ -1807,9 +1811,10 @@ func (b *Balancer) selectLowestScoreLocked(count int, scorer func(int) uint64) [
 		score uint64
 	}
 
-	ordered := b.rotatedActiveIndicesLocked(count)
+	start := b.rotatedStartLocked(count)
 	scored := make([]scoredIdx, n)
-	for i, idx := range ordered {
+	for i := 0; i < n; i++ {
+		idx := b.uplinkActiveIDs[(start+i)%n]
 		scored[i] = scoredIdx{idx: idx, score: scorer(idx)}
 	}
 
@@ -1842,10 +1847,15 @@ func (b *Balancer) connectionsByIndicesLocked(indices []int) []Connection {
 }
 
 func (b *Balancer) bestScoredConnectionLocked(scorer func(int) uint64) (Connection, bool) {
-	ordered := b.rotatedActiveIndicesLocked(1)
+	n := len(b.uplinkActiveIDs)
+	if n == 0 {
+		return Connection{}, false
+	}
+	start := b.rotatedStartLocked(1)
 	bestIndex := -1
 	var bestScore uint64
-	for _, idx := range ordered {
+	for i := 0; i < n; i++ {
+		idx := b.uplinkActiveIDs[(start+i)%n]
 		score := scorer(idx)
 		if bestIndex == -1 || score < bestScore {
 			bestIndex = idx
@@ -1859,10 +1869,15 @@ func (b *Balancer) bestScoredConnectionLocked(scorer func(int) uint64) (Connecti
 }
 
 func (b *Balancer) bestScoredConnectionExcludingLocked(scorer func(int) uint64, excludeKey string) (Connection, bool) {
-	ordered := b.rotatedActiveIndicesLocked(1)
+	n := len(b.uplinkActiveIDs)
+	if n == 0 {
+		return Connection{}, false
+	}
+	start := b.rotatedStartLocked(1)
 	bestIndex := -1
 	var bestScore uint64
-	for _, idx := range ordered {
+	for i := 0; i < n; i++ {
+		idx := b.uplinkActiveIDs[(start+i)%n]
 		if b.connections[idx].Key == excludeKey {
 			continue
 		}
@@ -1887,10 +1902,13 @@ func (b *Balancer) roundRobinBestConnectionLocked() (Connection, bool) {
 }
 
 func (b *Balancer) roundRobinBestConnectionExcludingLocked(excludeKey string) (Connection, bool) {
-	if len(b.uplinkActiveIDs) == 0 {
+	n := len(b.uplinkActiveIDs)
+	if n == 0 {
 		return Connection{}, false
 	}
-	for _, idx := range b.rotatedActiveIndicesLocked(1) {
+	start := b.rotatedStartLocked(1)
+	for i := 0; i < n; i++ {
+		idx := b.uplinkActiveIDs[(start+i)%n]
 		if b.connections[idx].Key == excludeKey {
 			continue
 		}
@@ -1899,20 +1917,19 @@ func (b *Balancer) roundRobinBestConnectionExcludingLocked(excludeKey string) (C
 	return Connection{}, false
 }
 
-func (b *Balancer) rotatedActiveIndicesLocked(step int) []int {
-	if len(b.uplinkActiveIDs) == 0 {
-		return nil
+// rotatedStartLocked advances the round-robin cursor by step and returns the
+// starting index into uplinkActiveIDs. Callers iterate
+// uplinkActiveIDs[(start+i)%n] directly, which keeps the hot selection path
+// allocation-free regardless of how many resolvers are active.
+func (b *Balancer) rotatedStartLocked(step int) int {
+	n := len(b.uplinkActiveIDs)
+	if n == 0 {
+		return 0
 	}
 	if step < 1 {
 		step = 1
 	}
-
-	start := roundRobinStartIndex(b.rrCounter.Add(uint64(step))-uint64(step), len(b.uplinkActiveIDs))
-	ordered := make([]int, len(b.uplinkActiveIDs))
-	for i := range b.uplinkActiveIDs {
-		ordered[i] = b.uplinkActiveIDs[(start+i)%len(b.uplinkActiveIDs)]
-	}
-	return ordered
+	return roundRobinStartIndex(b.rrCounter.Add(uint64(step))-uint64(step), n)
 }
 
 func roundRobinStartIndex(counter uint64, n int) int {

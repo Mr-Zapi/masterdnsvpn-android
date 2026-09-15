@@ -57,28 +57,37 @@ const (
 	// downloadPumpMaxInFlightPerResolver caps the adaptive in-flight ramp so a
 	// single resolver cannot be flooded even on very healthy paths.
 	downloadPumpMaxInFlightPerResolver = 16
+	// downloadPumpMaxInFlightTotal bounds the total number of outstanding polls
+	// across every downlink resolver, so a very large resolver pool cannot
+	// create an unbounded number of in-flight queries.
+	downloadPumpMaxInFlightTotal = 4096
+	// downloadPumpDataResponseSize is the response size above which a reply is
+	// treated as carrying a download fragment rather than a bare PONG.
+	downloadPumpDataResponseSize = 300
 )
 
 // downlinkPump is the shared state for the async downlink poll engine.
 type downlinkPump struct {
 	client *Client
 
-	mu          sync.Mutex
-	states      map[string]*downlinkPumpState
-	order       []string
-	rr          int
-	refreshedAt time.Time
+	mu            sync.Mutex
+	states        map[string]*downlinkPumpState
+	order         []string
+	rr            int
+	inflightTotal int
+	refreshedAt   time.Time
 }
 
 type downlinkPumpState struct {
-	conn     Connection
-	addr     *net.UDPAddr
-	label    string
-	inflight int
-	target   int
-	lastSent time.Time
-	lastResp time.Time
-	seq      uint32
+	conn         Connection
+	addr         *net.UDPAddr
+	label        string
+	inflight     int
+	target       int
+	lastSent     time.Time
+	lastResp     time.Time
+	lastDataResp time.Time
+	seq          uint32
 }
 
 // startDownloadPumps launches the downlink poll engine if it is enabled in the
@@ -270,6 +279,7 @@ func (p *downlinkPump) refresh(force bool) {
 
 	next := make(map[string]*downlinkPumpState, len(resolvers))
 	order := make([]string, 0, len(resolvers))
+	inflightTotal := 0
 	for _, conn := range resolvers {
 		label := conn.ResolverLabel
 		if label == "" {
@@ -290,12 +300,14 @@ func (p *downlinkPump) refresh(force bool) {
 		if state.target < 1 {
 			state.target = target
 		}
+		inflightTotal += state.inflight
 		next[key] = state
 		order = append(order, key)
 	}
 
 	p.states = next
 	p.order = order
+	p.inflightTotal = inflightTotal
 	if p.rr >= len(p.order) {
 		p.rr = 0
 	}
@@ -307,6 +319,10 @@ func (p *downlinkPump) refresh(force bool) {
 func (p *downlinkPump) reserve(now time.Time) *downlinkPumpState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.inflightTotal >= downloadPumpMaxInFlightTotal {
+		return nil
+	}
 
 	n := len(p.order)
 	for i := 0; i < n; i++ {
@@ -323,6 +339,7 @@ func (p *downlinkPump) reserve(now time.Time) *downlinkPumpState {
 		}
 		state.inflight++
 		state.lastSent = now
+		p.inflightTotal++
 		p.rr = (idx + 1) % n
 		return state
 	}
@@ -336,6 +353,9 @@ func (p *downlinkPump) rollback(state *downlinkPumpState) {
 	p.mu.Lock()
 	if state.inflight > 0 {
 		state.inflight--
+		if p.inflightTotal > 0 {
+			p.inflightTotal--
+		}
 	}
 	p.mu.Unlock()
 }
@@ -354,8 +374,14 @@ func (p *downlinkPump) noteResponse(addr *net.UDPAddr, size int) {
 	if state != nil {
 		if state.inflight > 0 {
 			state.inflight--
+			if p.inflightTotal > 0 {
+				p.inflightTotal--
+			}
 		}
 		state.lastResp = now
+		if size > downloadPumpDataResponseSize {
+			state.lastDataResp = now
+		}
 	}
 	p.mu.Unlock()
 
@@ -365,7 +391,7 @@ func (p *downlinkPump) noteResponse(addr *net.UDPAddr, size int) {
 
 	client := p.client
 	client.pumpResponses.Add(1)
-	if size > 300 {
+	if size > downloadPumpDataResponseSize {
 		client.pumpDataResponses.Add(1)
 		client.pumpDataBytes.Add(int64(size))
 	} else {
@@ -485,13 +511,20 @@ func (p *downlinkPump) maintain(now time.Time) {
 		// Reap stalled in-flight polls so a dead resolver does not permanently
 		// consume its budget.
 		if state.inflight > 0 && !state.lastSent.IsZero() && now.Sub(state.lastSent) > downloadPumpResponseTimeout {
+			p.inflightTotal -= state.inflight
+			if p.inflightTotal < 0 {
+				p.inflightTotal = 0
+			}
 			state.inflight = 0
 		}
-		if state.lastResp.IsZero() {
+
+		// Adapt on real download delivery, not on bare PONGs: ramping while
+		// only PONGs arrive would waste uplink on an idle server queue.
+		if state.lastDataResp.IsZero() {
 			continue
 		}
 
-		age := now.Sub(state.lastResp)
+		age := now.Sub(state.lastDataResp)
 		switch {
 		case age <= downloadPumpResponseTimeout/2:
 			if state.target < downloadPumpMaxInFlightPerResolver {
