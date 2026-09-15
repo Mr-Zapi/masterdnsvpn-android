@@ -63,9 +63,14 @@ type ClientConfig struct {
 	MaxUploadMTU                          int      `toml:"MAX_UPLOAD_MTU"`
 	MaxDownloadMTU                        int      `toml:"MAX_DOWNLOAD_MTU"`
 	AutoRemoveLowMTUServers               bool     `toml:"AUTO_REMOVE_LOW_MTU_SERVERS"`
-	MTUTestRetries                        int      `toml:"MTU_TEST_RETRIES"`
-	MTUTestTimeout                        float64  `toml:"MTU_TEST_TIMEOUT"`
-	MTUTestParallelism                    int      `toml:"MTU_TEST_PARALLELISM"`
+	// MTUOptimizerAggressive trades resolver redundancy for a higher session
+	// MTU: it drops low-MTU outliers more readily so a single weak resolver no
+	// longer caps the throughput of the whole tunnel. Only meaningful when
+	// AutoRemoveLowMTUServers is enabled.
+	MTUOptimizerAggressive bool    `toml:"MTU_OPTIMIZER_AGGRESSIVE"`
+	MTUTestRetries         int     `toml:"MTU_TEST_RETRIES"`
+	MTUTestTimeout         float64 `toml:"MTU_TEST_TIMEOUT"`
+	MTUTestParallelism     int     `toml:"MTU_TEST_PARALLELISM"`
 	// MTUSearchTolerance stops the MTU binary search once the remaining range
 	// is this small, trading a few bytes of MTU for far fewer timed-out
 	// overshoot probes (the main startup cost).
@@ -190,6 +195,7 @@ func defaultClientConfig() ClientConfig {
 		MaxUploadMTU:                          150,
 		MaxDownloadMTU:                        500,
 		AutoRemoveLowMTUServers:               true,
+		MTUOptimizerAggressive:                false,
 		MTUTestRetries:                        2,
 		MTUTestTimeout:                        2.0,
 		MTUTestParallelism:                    16,

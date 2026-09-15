@@ -75,6 +75,9 @@ func mobileSpeedOverrides() map[string]any {
 		// the tunnel cannot find enough valid resolvers.
 		"MinUploadMTU":   64,
 		"MinDownloadMTU": 1024,
+		// A fine MTU search finds a few more payload bytes per packet. The
+		// extra overshoot probes only cost a little startup time.
+		"MTUSearchTolerance": 8,
 		// More queries in flight = more aggregate throughput on a high-RTT,
 		// UDP request/response tunnel. Server caps are 255 workers / 20 batch /
 		// 8000 ARQ window, so over-asking is clamped safely.
@@ -95,7 +98,7 @@ func mobileSpeedOverrides() map[string]any {
 		// two sets are disjoint. Set DOWNLINK to 0 to disable the split.
 		"UplinkResolversPercent":   75,
 		"DownlinkResolversPercent": 25,
-		"DownloadPumpConcurrency":  6,
+		"DownloadPumpConcurrency":  8,
 	}
 }
 

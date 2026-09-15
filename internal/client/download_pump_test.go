@@ -156,6 +156,30 @@ func TestDownlinkPumpMaintainDoesNotRampOnPong(t *testing.T) {
 	}
 }
 
+func TestDownlinkPumpMaintainDecaysToSingleIdlePoll(t *testing.T) {
+	pump, _ := newTestDownlinkPump(t, 25)
+
+	pump.mu.Lock()
+	var state *downlinkPumpState
+	for _, s := range pump.states {
+		state = s
+	}
+	state.lastDataResp = time.Now().Add(-3 * downloadPumpResponseTimeout)
+	state.target = 8
+	pump.mu.Unlock()
+
+	for i := 0; i < 12; i++ {
+		pump.maintain(time.Now())
+	}
+
+	pump.mu.Lock()
+	target := state.target
+	pump.mu.Unlock()
+	if target != 1 {
+		t.Fatalf("expected idle target to decay to 1, got %d", target)
+	}
+}
+
 func TestDownlinkPumpGlobalInFlightCap(t *testing.T) {
 	pump, _ := newTestDownlinkPump(t, 25)
 

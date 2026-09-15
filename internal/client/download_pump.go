@@ -41,7 +41,7 @@ const (
 	downloadPumpIdlePollInterval = 20 * time.Millisecond
 	// downloadPumpMinSendInterval spaces back-to-back polls to the same
 	// resolver so a single resolver cannot be flooded.
-	downloadPumpMinSendInterval = 5 * time.Millisecond
+	downloadPumpMinSendInterval = 3 * time.Millisecond
 	// downloadPumpBackoffInterval is used when every resolver is at its
 	// in-flight target (or the writer queue is full).
 	downloadPumpBackoffInterval = 2 * time.Millisecond
@@ -56,7 +56,7 @@ const (
 	downloadPumpMaintenanceInterval = 250 * time.Millisecond
 	// downloadPumpMaxInFlightPerResolver caps the adaptive in-flight ramp so a
 	// single resolver cannot be flooded even on very healthy paths.
-	downloadPumpMaxInFlightPerResolver = 16
+	downloadPumpMaxInFlightPerResolver = 32
 	// downloadPumpMaxInFlightTotal bounds the total number of outstanding polls
 	// across every downlink resolver, so a very large resolver pool cannot
 	// create an unbounded number of in-flight queries.
@@ -531,7 +531,14 @@ func (p *downlinkPump) maintain(now time.Time) {
 				state.target++
 			}
 		case age > downloadPumpResponseTimeout:
-			if state.target > base {
+			// Drop to a single in-flight poll once downloads have been idle
+			// for a while, so an idle-but-connected stream does not keep the
+			// whole downlink pool busy chasing PONGs.
+			floor := base
+			if age > 2*downloadPumpResponseTimeout {
+				floor = 1
+			}
+			if state.target > floor {
 				state.target--
 			}
 		}

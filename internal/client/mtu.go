@@ -107,7 +107,14 @@ func (c *Client) optimizeMTUResolvers(connections []Connection) ([]Connection, i
 	validConns, oldMinUp, oldMinDown, _ := summarizeValidMTUConnections(connections)
 	totalValid := len(validConns)
 
-	if totalValid < 5 {
+	// The optimizer needs at least two resolvers to have anything to drop.
+	// Aggressive mode also applies to small pools (>= 3) so a single low-MTU
+	// outlier does not cap a small but otherwise fast resolver set.
+	minValidForOptimizer := 5
+	if c.cfg.MTUOptimizerAggressive {
+		minValidForOptimizer = 3
+	}
+	if totalValid < minValidForOptimizer {
 		return summarizeValidMTUConnections(validConns)
 	}
 
@@ -156,6 +163,20 @@ func (c *Client) optimizeMTUResolvers(connections []Connection) ([]Connection, i
 		toleranceRatio = 0.70
 		minGainUp = 64
 		minGainDown = 160
+	}
+
+	if c.cfg.MTUOptimizerAggressive {
+		// Tighter tolerance: a resolver within ~10% of the p75 is kept, an
+		// outlier below it is dropped if the resulting MTU gain is worthwhile.
+		if toleranceRatio < 0.90 {
+			toleranceRatio = 0.90
+		}
+		if minGainUp > 24 {
+			minGainUp = 24
+		}
+		if minGainDown > 96 {
+			minGainDown = 96
+		}
 	}
 
 	maxAllowedDrops := int(float64(totalValid) * maxDropRatio)
