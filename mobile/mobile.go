@@ -75,8 +75,8 @@ func mobileSpeedOverrides() map[string]any {
 		// the tunnel cannot find enough valid resolvers.
 		"MinUploadMTU":   64,
 		"MinDownloadMTU": 1024,
-		// A fine MTU search finds a few more payload bytes per packet. The
-		// extra overshoot probes only cost a little startup time.
+		// Finer MTU search: finds a few more payload bytes per packet, at the
+		// cost of a little extra startup probing.
 		"MTUSearchTolerance": 8,
 		// More queries in flight = more aggregate throughput on a high-RTT,
 		// UDP request/response tunnel. Server caps are 255 workers / 20 batch /
@@ -90,10 +90,10 @@ func mobileSpeedOverrides() map[string]any {
 		"BaseEncodeData": false,
 		// Discover resolvers on more parallel probes (faster startup only).
 		"MTUTestParallelism": 32,
-		// Bound the MTU scan of a huge scanned list to a spread sample; the
-		// health loop validates the rest against the session MTU later.
+		// Bound the MTU scan of a huge list to a spread sample; the health loop
+		// validates the rest against the session MTU.
 		"MTUTestMaxResolvers": 512,
-		// Drop low-MTU outliers so one weak resolver does not cap the tunnel.
+		// Drop low-MTU outliers so one weak resolver cannot cap the tunnel.
 		"MTUOptimizerAggressive": true,
 		// Dedicated download pullers: keep extra empty poll requests in flight
 		// on a dedicated share of the resolver pool so the server returns more
