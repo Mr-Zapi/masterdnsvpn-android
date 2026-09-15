@@ -127,6 +127,19 @@ type Client struct {
 	plannerQueueSpaceSignal chan struct{}
 	writerQueueSpaceSignal  chan struct{}
 
+	// Download pump diagnostics (5s rolling counters).
+	pumpRequests      atomic.Int64
+	pumpResponses     atomic.Int64
+	pumpDataResponses atomic.Int64
+	pumpSmallResponse atomic.Int64
+	pumpDataBytes     atomic.Int64
+
+	// Cached best-resolver selection for the download pumps, refreshed
+	// periodically so the dedicated downloaders follow MTU updates.
+	pumpSelectMu sync.Mutex
+	pumpSelect   []Connection
+	pumpSelectAt time.Time
+
 	// Autonomous Ping Manager
 	pingManager *PingManager
 

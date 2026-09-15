@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootScroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/bg"
+    android:clipToPadding="false"
     android:fillViewport="true">
 
     <LinearLayout
@@ -14,21 +16,43 @@
         android:paddingTop="40dp"
         android:paddingBottom="32dp">
 
-        <!-- Wordmark -->
-        <TextView
-            android:layout_width="wrap_content"
+        <!-- Header: wordmark centred, settings gear on the right -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MASTER · DNS · VPN"
-            android:textColor="@color/text_secondary"
-            android:textSize="12sp"
-            android:letterSpacing="0.28"
-            android:fontFamily="sans-serif-medium" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
 
-        <!-- Power button with glow -->
+            <View
+                android:layout_width="40dp"
+                android:layout_height="1dp" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="MASTER · DNS · VPN"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:letterSpacing="0.28"
+                android:fontFamily="sans-serif-medium" />
+
+            <ImageView
+                android:id="@+id/settingsButton"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:padding="8dp"
+                android:src="@drawable/ic_settings"
+                android:clickable="true"
+                android:focusable="true"
+                android:contentDescription="Settings" />
+        </LinearLayout>
+
         <FrameLayout
             android:layout_width="240dp"
             android:layout_height="240dp"
-            android:layout_marginTop="48dp">
+            android:layout_marginTop="40dp">
 
             <View
                 android:id="@+id/glow"
@@ -58,7 +82,6 @@
             </FrameLayout>
         </FrameLayout>
 
-        <!-- Status -->
         <TextView
             android:id="@+id/statusText"
             android:layout_width="wrap_content"
@@ -78,7 +101,7 @@
             android:textColor="@color/text_secondary"
             android:textSize="13sp" />
 
-        <!-- Settings card -->
+        <!-- Config card -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -112,29 +135,68 @@
                 android:gravity="top" />
 
             <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="18dp"
-                android:text="RESOLVERS"
-                android:textColor="@color/text_secondary"
-                android:textSize="11sp"
-                android:letterSpacing="0.14"
-                android:fontFamily="sans-serif-medium" />
-
-            <EditText
-                android:id="@+id/resolversInput"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:background="@drawable/bg_input"
-                android:padding="14dp"
-                android:hint="77.88.8.8:53&#10;77.88.8.1:53"
-                android:textColorHint="@color/text_secondary"
-                android:textColor="@color/text_primary"
-                android:textSize="14sp"
-                android:inputType="textMultiLine"
-                android:minLines="2"
-                android:gravity="top" />
+                android:text="Только домен, ключ и метод шифрования — тюнинг в ⚙"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <!-- Resolver lists card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="20dp"
+            android:background="@drawable/bg_card"
+            android:padding="20dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="RESOLVER LISTS"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="11sp"
+                    android:letterSpacing="0.14"
+                    android:fontFamily="sans-serif-medium" />
+
+                <TextView
+                    android:id="@+id/addListButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:paddingHorizontal="12dp"
+                    android:paddingVertical="6dp"
+                    android:text="+ ADD"
+                    android:textColor="@color/accent"
+                    android:textSize="12sp"
+                    android:fontFamily="sans-serif-medium"
+                    android:clickable="true"
+                    android:focusable="true" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/resolverListsContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:layout_marginTop="4dp" />
+
+            <TextView
+                android:id="@+id/resolverSummary"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:text="0 active resolvers" />
         </LinearLayout>
     </LinearLayout>
 </ScrollView>

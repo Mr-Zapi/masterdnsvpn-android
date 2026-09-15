@@ -1102,9 +1102,15 @@ func (c *Client) binarySearchMTU(ctx context.Context, label string, minValue, ma
 		bestRTT = rtt
 	}
 
+	// Stop narrowing once the remaining range is within the tolerance. An
+	// overshoot probe can only fail by timing out, so each costs a full
+	// MTU_TEST_TIMEOUT and those dominate startup. best is always a value that
+	// actually passed, so this only ever gives up a few bytes of MTU.
+	tolerance := max(c.cfg.MTUSearchTolerance, 1)
+
 	left := low + 1
 	right := high - 1
-	for left <= right {
+	for left <= right && (right-left) >= tolerance {
 		if err := ctx.Err(); err != nil {
 			return 0, 0
 		}

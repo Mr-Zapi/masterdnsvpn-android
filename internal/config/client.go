@@ -66,6 +66,20 @@ type ClientConfig struct {
 	MTUTestRetries                        int               `toml:"MTU_TEST_RETRIES"`
 	MTUTestTimeout                        float64           `toml:"MTU_TEST_TIMEOUT"`
 	MTUTestParallelism                    int               `toml:"MTU_TEST_PARALLELISM"`
+	// MTUSearchTolerance stops the MTU binary search once the remaining range
+	// is this small. An overshoot probe can only fail by timing out, so each
+	// one costs a full MTU_TEST_TIMEOUT and those timeouts dominate startup;
+	// this trades a few bytes of MTU for far fewer of them.
+	MTUSearchTolerance int `toml:"MTU_SEARCH_TOLERANCE"`
+	// Download pump (client-only, not negotiated): dedicate N resolvers to
+	// continuously sending empty poll requests that pull queued download
+	// packets from the server, keeping DownloadPumpConcurrency requests in
+	// flight per resolver. The pump owns its own UDP sockets, so these polls
+	// never compete with upstream data for the shared transmit pipeline.
+	// 0 resolvers = disabled.
+	DownloadPumpResolvers        int `toml:"DOWNLOAD_PUMP_RESOLVERS"`
+	DownloadPumpResolversPercent int `toml:"DOWNLOAD_PUMP_RESOLVERS_PERCENT"`
+	DownloadPumpConcurrency      int `toml:"DOWNLOAD_PUMP_CONCURRENCY"`
 	RX_TX_Workers                         int               `toml:"RX_TX_WORKERS"`
 	LegacyTunnelReaderWorkers             int               `toml:"TUNNEL_READER_WORKERS"`
 	LegacyTunnelWriterWorkers             int               `toml:"TUNNEL_WRITER_WORKERS"`
@@ -79,6 +93,9 @@ type ClientConfig struct {
 	PingWarmThresholdSeconds              float64           `toml:"PING_WARM_THRESHOLD_SECONDS"`
 	PingCoolThresholdSeconds              float64           `toml:"PING_COOL_THRESHOLD_SECONDS"`
 	PingColdThresholdSeconds              float64           `toml:"PING_COLD_THRESHOLD_SECONDS"`
+	PingInflightTarget                    int               `toml:"PING_INFLIGHT_TARGET"`
+	PingInflightMin                       int               `toml:"PING_INFLIGHT_MIN"`
+	PingInflightAdaptive                  bool              `toml:"PING_INFLIGHT_ADAPTIVE"`
 	RXChannelSize                         int               `toml:"RX_CHANNEL_SIZE"`
 	DNSResponseFragmentTimeoutSeconds     float64           `toml:"DNS_RESPONSE_FRAGMENT_TIMEOUT_SECONDS"`
 	SOCKSUDPAssociateReadTimeoutSeconds   float64           `toml:"SOCKS_UDP_ASSOCIATE_READ_TIMEOUT_SECONDS"`
@@ -163,11 +180,19 @@ func defaultClientConfig() ClientConfig {
 		MinUploadMTU:                          38,
 		MinDownloadMTU:                        100,
 		MaxUploadMTU:                          150,
-		MaxDownloadMTU:                        500,
+		// The download MTU is found by binary search bounded by this value, so a
+		// low default silently caps throughput: every answer carries at most this
+		// many bytes. 500 left clients ~7x slower than the 3603 a normal path
+		// negotiates, and only configs that overrode it ever went faster.
+		MaxDownloadMTU:                        4000,
 		AutoRemoveLowMTUServers:               true,
 		MTUTestRetries:                        2,
 		MTUTestTimeout:                        2.0,
 		MTUTestParallelism:                    16,
+		MTUSearchTolerance:                    32,
+		DownloadPumpResolvers:                 0,
+		DownloadPumpResolversPercent:          25,
+		DownloadPumpConcurrency:               6,
 		RX_TX_Workers:                         4,
 		TunnelProcessWorkers:                  0,
 		TunnelPacketTimeoutSec:                10.0,
@@ -179,6 +204,9 @@ func defaultClientConfig() ClientConfig {
 		PingWarmThresholdSeconds:              8.0,
 		PingCoolThresholdSeconds:              20.0,
 		PingColdThresholdSeconds:              30.0,
+		PingInflightTarget:                    128,
+		PingInflightMin:                       16,
+		PingInflightAdaptive:                  true,
 		RXChannelSize:                         4096,
 		DNSResponseFragmentTimeoutSeconds:     60.0,
 		SOCKSUDPAssociateReadTimeoutSeconds:   30.0,
@@ -428,6 +456,10 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUTestRetries = defaultIntBelow(cfg.MTUTestRetries, 1, 1)
 	cfg.MTUTestTimeout = defaultFloatAtMostZero(cfg.MTUTestTimeout, 2.0)
 	cfg.MTUTestParallelism = defaultIntBelow(cfg.MTUTestParallelism, 1, 1)
+	cfg.MTUSearchTolerance = clampInt(defaultIntBelow(cfg.MTUSearchTolerance, 1, 32), 1, 512)
+	cfg.DownloadPumpResolvers = clampInt(cfg.DownloadPumpResolvers, 0, 64)
+	cfg.DownloadPumpResolversPercent = clampInt(cfg.DownloadPumpResolversPercent, 0, 100)
+	cfg.DownloadPumpConcurrency = clampInt(defaultIntBelow(cfg.DownloadPumpConcurrency, 1, 6), 1, 64)
 	legacyRX_TX_Workers := max(cfg.LegacyTunnelReaderWorkers, cfg.LegacyTunnelWriterWorkers)
 	if !cfg.explicitRX_TX_Workers && legacyRX_TX_Workers > 0 {
 		cfg.RX_TX_Workers = legacyRX_TX_Workers
@@ -449,6 +481,8 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.PingWarmThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingWarmThresholdSeconds, 8.0), 0.1, 600.0)
 	cfg.PingCoolThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingCoolThresholdSeconds, 20.0), cfg.PingWarmThresholdSeconds, 1800.0)
 	cfg.PingColdThresholdSeconds = clampFloat(defaultFloatAtMostZero(cfg.PingColdThresholdSeconds, 30.0), cfg.PingCoolThresholdSeconds, 3600.0)
+	cfg.PingInflightTarget = clampInt(defaultIntBelow(cfg.PingInflightTarget, 1, 1), 1, 512)
+	cfg.PingInflightMin = clampInt(defaultIntBelow(cfg.PingInflightMin, 1, 16), 1, cfg.PingInflightTarget)
 	cfg.RXChannelSize = clampInt(defaultIntBelow(cfg.RXChannelSize, 1, 4096), 64, 65536)
 	cfg.DNSResponseFragmentTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.DNSResponseFragmentTimeoutSeconds, 60.0), 1.0, 600.0)
 	cfg.SOCKSUDPAssociateReadTimeoutSeconds = clampFloat(defaultFloatAtMostZero(cfg.SOCKSUDPAssociateReadTimeoutSeconds, 30.0), 1.0, 3600.0)
