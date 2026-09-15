@@ -45,6 +45,32 @@ type Client struct {
 	// Set once before Run(); read-only afterwards.
 	directDNSResolver func(query []byte) ([]byte, bool)
 
+	// Optional hook: when set, every resolver probe packet (MTU/health probe)
+	// waits on this gate before being sent. Used by the scanner to pace packets
+	// (max packets per second, spread across the second). nil = unrestricted.
+	// Stored atomically because ProbeResolvers installs/removes it while MTU
+	// probe goroutines may read it concurrently.
+	probeGate atomic.Pointer[func(ctx context.Context) error]
+
+	// readyCh is closed once the local proxy listener is accepting connections,
+	// so callers (e.g. the Android tun2socks bridge) can wait before forwarding
+	// traffic instead of sending it into a listener that is not up yet.
+	readyCh   chan struct{}
+	readyOnce sync.Once
+
+	// Download pump diagnostics (5s rolling counters).
+	pumpRequests      atomic.Int64
+	pumpResponses     atomic.Int64
+	pumpDataResponses atomic.Int64
+	pumpSmallResponse atomic.Int64
+	pumpDataBytes     atomic.Int64
+
+	// Cached best-resolver selection for the download pumps, refreshed
+	// periodically so the dedicated downloaders follow MTU updates.
+	pumpSelectMu sync.Mutex
+	pumpSelect   []Connection
+	pumpSelectAt time.Time
+
 	successMTUChecks  bool
 	udpBufferPool     sync.Pool
 	resolverConnsMu   sync.Mutex
@@ -65,6 +91,9 @@ type Client struct {
 	mtuProbeCounter                       atomic.Uint32
 	mtuTestRetries                        int
 	mtuTestTimeout                        time.Duration
+	mtuSearchTolerance                    int
+	mtuBackgroundDiscovery                bool
+	mtuCache                              *mtuCache
 	mtuSaveToFile                         bool
 	mtuServersFileName                    string
 	mtuServersFileFormat                  string
@@ -96,6 +125,7 @@ type Client struct {
 	sessionResetSignal    chan struct{}
 	rxDroppedPackets      atomic.Uint64
 	lastRXDropLogUnix     atomic.Int64
+	lastInboundNano       atomic.Int64
 
 	// Async Runtime Workers & Channels
 	asyncWG              sync.WaitGroup
@@ -107,6 +137,7 @@ type Client struct {
 	tunnelRX_TX_Workers  int
 	tunnelProcessWorkers int
 	tunnelPacketTimeout  time.Duration
+	sessionIdleRestart   time.Duration
 
 	// Local Proxy Daemons
 	tcpListener *TCPListener
@@ -126,19 +157,6 @@ type Client struct {
 	dispatchSignal          chan struct{}
 	plannerQueueSpaceSignal chan struct{}
 	writerQueueSpaceSignal  chan struct{}
-
-	// Download pump diagnostics (5s rolling counters).
-	pumpRequests      atomic.Int64
-	pumpResponses     atomic.Int64
-	pumpDataResponses atomic.Int64
-	pumpSmallResponse atomic.Int64
-	pumpDataBytes     atomic.Int64
-
-	// Cached best-resolver selection for the download pumps, refreshed
-	// periodically so the dedicated downloaders follow MTU updates.
-	pumpSelectMu sync.Mutex
-	pumpSelect   []Connection
-	pumpSelectAt time.Time
 
 	// Autonomous Ping Manager
 	pingManager *PingManager
@@ -283,6 +301,9 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		resolverAddrCache:                     make(map[string]*net.UDPAddr),
 		mtuTestRetries:                        cfg.MTUTestRetries,
 		mtuTestTimeout:                        time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
+		mtuSearchTolerance:                    cfg.MTUSearchTolerance,
+		mtuBackgroundDiscovery:                cfg.MTUBackgroundDiscovery,
+		mtuCache:                              loadMTUCache(cfg.MTUCachePath(), cfg.MTUCacheTTL()),
 		mtuSaveToFile:                         cfg.SaveMTUServersToFile,
 		mtuServersFileName:                    cfg.MTUServersFileName,
 		mtuServersFileFormat:                  cfg.MTUServersFileFormat,
@@ -297,6 +318,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		tunnelRX_TX_Workers:     cfg.RX_TX_Workers,
 		tunnelProcessWorkers:    cfg.TunnelProcessWorkers,
 		tunnelPacketTimeout:     time.Duration(cfg.TunnelPacketTimeoutSec * float64(time.Second)),
+		sessionIdleRestart:      cfg.SessionIdleRestart(),
 		plannerQueue:            make(chan plannerTask, max(24, cfg.RX_TX_Workers*24)),
 		encodedTXChannel:        make(chan writerTask, max(24, cfg.RX_TX_Workers*24)),
 		rxChannel:               make(chan asyncReadPacket, cfg.EffectiveRXChannelSize()),
@@ -320,6 +342,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		orphanQueue:            mlq.New[VpnProto.Packet](cfg.EffectiveOrphanQueueInitialCapacity()),
 		sessionResetSignal:     make(chan struct{}, 1),
 		socksRateLimit:         newSocksRateLimiter(),
+		readyCh:                make(chan struct{}),
 	}
 
 	if c.streamResolverFailoverResendThreshold < 1 {
@@ -372,6 +395,54 @@ func (c *Client) SetDirectDNSResolver(resolve func(query []byte) ([]byte, bool))
 	c.directDNSResolver = resolve
 }
 
+// waitProbeGate waits on the optional probe pacing gate before a resolver probe
+// packet is sent. A nil gate means no pacing.
+func (c *Client) waitProbeGate(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	gate := c.probeGate.Load()
+	if gate == nil || *gate == nil {
+		return nil
+	}
+	return (*gate)(ctx)
+}
+
+// Ready returns a channel that is closed once the local proxy listener is up.
+func (c *Client) Ready() <-chan struct{} {
+	if c == nil || c.readyCh == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	return c.readyCh
+}
+
+// WaitReady blocks until the local proxy listener is accepting connections or
+// ctx is done (cancelled/timed out).
+func (c *Client) WaitReady(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	select {
+	case <-c.Ready():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) signalReady() {
+	if c == nil {
+		return
+	}
+	c.readyOnce.Do(func() {
+		if c.readyCh != nil {
+			close(c.readyCh)
+		}
+	})
+}
+
 // Run starts the main execution loop of the client.
 func (c *Client) Run(ctx context.Context) error {
 	c.successMTUChecks = false
@@ -390,38 +461,51 @@ func (c *Client) Run(ctx context.Context) error {
 			return nil
 		default:
 			if !c.successMTUChecks {
-				if err := c.RunInitialMTUTests(ctx); err != nil {
-					c.log.Errorf("<red>MTU tests failed: %v</red>", err)
-					c.successMTUChecks = false
-					// Wait a bit before retrying or exiting if critical
-					select {
-					case <-ctx.Done():
-						c.notifySessionCloseBurst(time.Second)
-						c.StopAsyncRuntime()
-						return nil
-					case <-time.After(5 * time.Second):
+				// Fast start: if background discovery is enabled, seed MTU
+				// values from cache (or conservative defaults) so the session
+				// can come up immediately, then refresh MTU in the background
+				// and hot-apply the result.
+				if c.mtuBackgroundDiscovery && (c.seedMTUFromCache() || c.seedSafeMTUDefaults()) {
+					c.successMTUChecks = true
+					if c.resolverHealthStarted.CompareAndSwap(false, true) {
+						go c.runResolverHealthLoop(ctx)
 					}
-					continue
-				}
-
-				if c.syncedUploadMTU <= 0 || c.syncedDownloadMTU <= 0 {
-					c.successMTUChecks = false
-					c.log.Errorf("<red>❌ MTU tests failed: Upload MTU: %d, Download MTU: %d</red>", c.syncedUploadMTU, c.syncedDownloadMTU)
-					select {
-					case <-ctx.Done():
-						c.notifySessionCloseBurst(time.Second)
-						c.StopAsyncRuntime()
-						return nil
-					case <-time.After(5 * time.Second):
+					c.ShortPrintBanner()
+					go c.runBackgroundMTUDiscovery(ctx)
+				} else {
+					if err := c.RunInitialMTUTests(ctx); err != nil {
+						c.log.Errorf("<red>MTU tests failed: %v</red>", err)
+						c.successMTUChecks = false
+						// Wait a bit before retrying or exiting if critical
+						select {
+						case <-ctx.Done():
+							c.notifySessionCloseBurst(time.Second)
+							c.StopAsyncRuntime()
+							return nil
+						case <-time.After(5 * time.Second):
+						}
+						continue
 					}
-					continue
-				}
 
-				c.successMTUChecks = true
-				if c.resolverHealthStarted.CompareAndSwap(false, true) {
-					go c.runResolverHealthLoop(ctx)
+					if c.syncedUploadMTU <= 0 || c.syncedDownloadMTU <= 0 {
+						c.successMTUChecks = false
+						c.log.Errorf("<red>❌ MTU tests failed: Upload MTU: %d, Download MTU: %d</red>", c.syncedUploadMTU, c.syncedDownloadMTU)
+						select {
+						case <-ctx.Done():
+							c.notifySessionCloseBurst(time.Second)
+							c.StopAsyncRuntime()
+							return nil
+						case <-time.After(5 * time.Second):
+						}
+						continue
+					}
+
+					c.successMTUChecks = true
+					if c.resolverHealthStarted.CompareAndSwap(false, true) {
+						go c.runResolverHealthLoop(ctx)
+					}
+					c.ShortPrintBanner()
 				}
-				c.ShortPrintBanner()
 			}
 
 			if !c.sessionReady {
@@ -460,6 +544,14 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 
 				c.ensureLocalDNSCachePersistence(ctx)
+			}
+
+			// Self-healing: if the ready session gets no inbound traffic for
+			// longer than the idle window, rebuild it. This is what recovers
+			// the tunnel after Doze/network-loss silently kills the path while
+			// the process and tun2socks engine stay up.
+			if c.sessionInactive(time.Now()) {
+				c.requestSessionRestart("session idle timeout")
 			}
 
 			select {

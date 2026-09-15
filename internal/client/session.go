@@ -169,6 +169,7 @@ func (c *Client) applySessionInitPacket(packet VpnProto.Packet, initPayload []by
 			c.applySessionClientPolicy(sessionAccept.ClientPolicy)
 		}
 		c.sessionReady = true
+		c.touchInbound()
 		c.applySessionCompressionPolicy()
 		c.clearSessionInitBusyUntil()
 		c.resetSessionInitStateLocked()
@@ -573,6 +574,12 @@ func (c *Client) sendSessionCloseRound(targets []Connection, deadline time.Time)
 func (c *Client) applySyncedMTUState(uploadMTU int, downloadMTU int, uploadChars int) {
 	if c == nil {
 		return
+	}
+	if c.cfg.MaxUploadMTU > 0 && uploadMTU > c.cfg.MaxUploadMTU {
+		uploadMTU = c.cfg.MaxUploadMTU
+	}
+	if c.cfg.MaxDownloadMTU > 0 && downloadMTU > c.cfg.MaxDownloadMTU {
+		downloadMTU = c.cfg.MaxDownloadMTU
 	}
 	c.syncedUploadMTU = uploadMTU
 	c.syncedDownloadMTU = downloadMTU
