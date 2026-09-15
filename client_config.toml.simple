@@ -219,9 +219,14 @@ MTU_BACKGROUND_DISCOVERY = true
 MTU_CACHE_TTL_SECONDS = 86400.0
 
 # Dedicated download pullers. Keep extra empty poll requests in flight on the
-# best-download resolvers so the server returns more download fragments per RTT
-# than the ACK-clocked flow alone. The resolver count can be set as a percentage
-# of the active pool (peak) and/or an absolute cap. Either 0 disables that limit.
+# downlink resolvers so the server returns more download fragments per RTT than
+# the ACK-clocked flow alone. The engine is asynchronous: polls share the normal
+# tunnel sockets and never spawn a goroutine or socket per resolver, so the cost
+# stays flat as the resolver count grows. DOWNLOAD_PUMP_CONCURRENCY is the
+# in-flight target per resolver (it adapts upward while responses keep flowing).
+# The resolver count can be set as a percentage of the active pool and/or an
+# absolute cap; with the directional split below, the whole downlink partition is
+# polled. Either 0 disables the pump.
 DOWNLOAD_PUMP_RESOLVERS_PERCENT = 0
 DOWNLOAD_PUMP_RESOLVERS = 0
 DOWNLOAD_PUMP_CONCURRENCY = 4

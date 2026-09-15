@@ -924,6 +924,9 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 	// reset the session idle watchdog.
 	c.touchInbound()
 
+	// Settle the downlink pump's in-flight budget for the resolver that replied.
+	c.noteDownlinkResponse(addr, len(data))
+
 	// 1. Extract VPN Packet from DNS Response
 	vpnPacket, err := DnsParser.ExtractVPNResponse(data, c.responseMode == mtuProbeBase64Reply)
 	if err != nil {

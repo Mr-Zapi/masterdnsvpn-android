@@ -5,19 +5,22 @@
 // Year: 2026
 // ==============================================================================
 // Package client provides the core logic for the MasterDnsVPN client.
-// This file (download_pump.go) implements optional "download pullers".
+// This file (download_pump.go) implements the async downlink poll engine.
 //
 // The tunnel is strictly request/response: the server returns at most one
 // queued packet per incoming query (serveQueuedOrPong on the server). A normal
 // download is therefore ACK-clocked at roughly one fragment per RTT per active
-// resolver. The pump breaks that cap by keeping several extra empty requests
-// (PINGs) in flight on a small number of dedicated resolvers. Each empty
-// request makes the server dequeue one queued download fragment.
+// resolver. The pump breaks that cap by keeping several empty requests
+// (PINGs) in flight on the downlink resolver partition. Each empty request
+// makes the server dequeue one queued download fragment.
 //
-// Responses are fed straight into the normal packet pipeline
-// (handleInboundPacket), so ARQ, stream reassembly, ACK generation and the
-// balancer's resolver statistics all keep working unchanged. This does not
-// change the wire protocol.
+// Unlike a blocking per-resolver worker, this engine never opens a socket per
+// resolver and never blocks on a read. It enqueues pre-built PING DNS queries
+// onto the shared tunnel writer queue (the same N UDP sockets used for uploads)
+// and lets the normal RX pipeline consume the responses. Resource usage is
+// therefore bounded by a small, fixed number of goroutines regardless of how
+// many resolvers are configured; only per-resolver in-flight counters scale
+// with the resolver count.
 // ==============================================================================
 package client
 
@@ -25,7 +28,7 @@ import (
 	"context"
 	"net"
 	"sort"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
@@ -33,26 +36,54 @@ import (
 )
 
 const (
-	// downloadPumpIdlePollInterval is how long a pump worker sleeps when no
-	// data stream is active, so an idle tunnel does not keep the radio busy.
+	// downloadPumpIdlePollInterval is how long a sender sleeps while no data
+	// stream is active, so an idle tunnel does not keep the radio busy.
 	downloadPumpIdlePollInterval = 20 * time.Millisecond
-	// downloadPumpReadTimeout bounds a single poll. It also bounds how long
-	// shutdown can wait on an in-flight poll.
-	downloadPumpReadTimeout = 1500 * time.Millisecond
+	// downloadPumpMinSendInterval spaces back-to-back polls to the same
+	// resolver so a single resolver cannot be flooded.
+	downloadPumpMinSendInterval = 5 * time.Millisecond
+	// downloadPumpBackoffInterval is used when every resolver is at its
+	// in-flight target (or the writer queue is full).
+	downloadPumpBackoffInterval = 2 * time.Millisecond
+	// downloadPumpResponseTimeout bounds how long an unanswered poll keeps
+	// counting against a resolver's in-flight budget.
+	downloadPumpResponseTimeout = 5 * time.Second
+	// downloadPumpRefreshInterval is how often the downlink resolver set is
+	// re-read from the balancer (follows MTU/partition changes).
+	downloadPumpRefreshInterval = time.Second
+	// downloadPumpMaintenanceInterval is how often stalled polls are reaped and
+	// the per-resolver in-flight target is adapted.
+	downloadPumpMaintenanceInterval = 250 * time.Millisecond
+	// downloadPumpMaxInFlightPerResolver caps the adaptive in-flight ramp so a
+	// single resolver cannot be flooded even on very healthy paths.
+	downloadPumpMaxInFlightPerResolver = 16
 )
 
-type downloadPump struct {
+// downlinkPump is the shared state for the async downlink poll engine.
+type downlinkPump struct {
 	client *Client
-	// slot identifies which of the N best resolvers this worker follows. The
-	// worker re-reads its current target each poll so the dedicated download
-	// resolvers follow MTU changes discovered after startup.
-	slot int
-	seq  atomic.Uint32
+
+	mu          sync.Mutex
+	states      map[string]*downlinkPumpState
+	order       []string
+	rr          int
+	refreshedAt time.Time
 }
 
-// startDownloadPumps spawns the dedicated pollers if enabled in the config.
-// It is called from StartAsyncRuntime (after the session is initialized) and
-// tracked by asyncWG so StopAsyncRuntime waits for them.
+type downlinkPumpState struct {
+	conn     Connection
+	addr     *net.UDPAddr
+	label    string
+	inflight int
+	target   int
+	lastSent time.Time
+	lastResp time.Time
+	seq      uint32
+}
+
+// startDownloadPumps launches the downlink poll engine if it is enabled in the
+// config. It is called from StartAsyncRuntime (after the session is initialized)
+// and tracked by asyncWG so StopAsyncRuntime waits for it.
 func (c *Client) startDownloadPumps(ctx context.Context) {
 	if c == nil || c.balancer == nil {
 		return
@@ -61,32 +92,57 @@ func (c *Client) startDownloadPumps(ctx context.Context) {
 	if !c.downloadPumpEnabled() {
 		return
 	}
-	concurrency := c.cfg.DownloadPumpConcurrency
-	if concurrency < 1 {
-		concurrency = 1
-	}
 
-	conns := c.downloadPumpConnections(true)
-	if len(conns) == 0 {
+	pump := newDownlinkPump(c)
+	pump.refresh(true)
+	if len(pump.order) == 0 {
 		return
 	}
+
+	// A handful of senders is enough: they only build PING packets and enqueue
+	// them, they never block on I/O. Sending itself is done by the writer pool.
+	senders := min(max(c.cfg.RX_TX_Workers, 2), 16)
+	if senders > len(pump.order) {
+		senders = len(pump.order)
+	}
+	if senders < 1 {
+		senders = 1
+	}
+
+	c.downlinkPump.Store(pump)
+
 	if c.log != nil {
 		c.log.Infof(
-			"<cyan>[PUMP]</cyan> Download pump enabled: <yellow>%d</yellow> resolver(s) x <yellow>%d</yellow> in-flight requests",
-			len(conns),
-			concurrency,
+			"<cyan>[PUMP]</cyan> Downlink pump enabled: <yellow>%d</yellow> resolver(s), <yellow>%d</yellow> sender(s), up to <yellow>%d</yellow> in-flight each",
+			len(pump.order),
+			senders,
+			c.downloadPumpTarget(),
 		)
 	}
 
-	for i := range conns {
-		p := &downloadPump{client: c, slot: i}
-		for j := 0; j < concurrency; j++ {
-			c.asyncWG.Add(1)
-			go p.worker(ctx)
-		}
+	for i := 0; i < senders; i++ {
+		c.asyncWG.Add(1)
+		go pump.sender(ctx)
 	}
 	c.asyncWG.Add(1)
+	go pump.maintenance(ctx)
+	c.asyncWG.Add(1)
 	go c.runDownloadPumpReporter(ctx)
+}
+
+// noteDownlinkResponse is called from the RX path for every inbound tunnel
+// datagram. It settles the in-flight budget of the sending downlink resolver.
+// It is a no-op unless an async pump is installed and the sender is part of the
+// downlink partition.
+func (c *Client) noteDownlinkResponse(addr *net.UDPAddr, size int) {
+	if c == nil || addr == nil {
+		return
+	}
+	pump := c.downlinkPump.Load()
+	if pump == nil {
+		return
+	}
+	pump.noteResponse(addr, size)
 }
 
 // downloadPumpEnabled reports whether the pump should run. It is on when the
@@ -101,20 +157,60 @@ func (c *Client) downloadPumpEnabled() bool {
 		c.cfg.DownloadPumpResolversPercent > 0
 }
 
-// downloadPumpPool returns the candidate resolvers the pump may poll. When the
+// downloadPumpTarget is the configured per-resolver in-flight floor.
+func (c *Client) downloadPumpTarget() int {
+	if c == nil {
+		return 1
+	}
+	target := c.cfg.DownloadPumpConcurrency
+	if target < 1 {
+		target = 1
+	}
+	if target > downloadPumpMaxInFlightPerResolver {
+		target = downloadPumpMaxInFlightPerResolver
+	}
+	return target
+}
+
+// downloadPumpResolvers returns the resolvers the pump may poll. When the
 // directional split is active this is exactly the downlink partition (disjoint
 // from the uplink resolvers used for uploads). Otherwise it falls back to the
-// whole active pool for the legacy top-N selection.
-func (c *Client) downloadPumpPool() []Connection {
+// legacy top-N selection over the whole active pool.
+func (c *Client) downloadPumpResolvers() []Connection {
 	if c == nil || c.balancer == nil {
 		return nil
 	}
-	return c.balancer.DownloadConnections()
+
+	pool := c.balancer.DownloadConnections()
+	if len(pool) == 0 {
+		return nil
+	}
+
+	if c.cfg.DownlinkResolversPercent > 0 {
+		return pool
+	}
+
+	n := c.effectiveDownloadPumpResolvers(len(pool))
+	if n <= 0 {
+		return nil
+	}
+	if n > len(pool) {
+		n = len(pool)
+	}
+	// Legacy path: poll the resolvers with the best download capacity.
+	sort.SliceStable(pool, func(i, j int) bool {
+		if pool[i].DownloadMTUBytes != pool[j].DownloadMTUBytes {
+			return pool[i].DownloadMTUBytes > pool[j].DownloadMTUBytes
+		}
+		return pool[i].MTUResolveTime < pool[j].MTUResolveTime
+	})
+	return pool[:n]
 }
 
 // effectiveDownloadPumpResolvers returns how many resolvers to dedicate to
-// download pumping. With a percentage configured, it is that share of the
-// active pool (at least 1), optionally capped by DownloadPumpResolvers.
+// download pumping in legacy mode. With a percentage configured, it is that
+// share of the active pool (at least 1), optionally capped by
+// DownloadPumpResolvers.
 func (c *Client) effectiveDownloadPumpResolvers(active int) int {
 	if c == nil || active <= 0 {
 		return 0
@@ -143,6 +239,270 @@ func (c *Client) effectiveDownloadPumpResolvers(active int) int {
 		target = active
 	}
 	return target
+}
+
+func newDownlinkPump(c *Client) *downlinkPump {
+	return &downlinkPump{
+		client: c,
+		states: make(map[string]*downlinkPumpState),
+	}
+}
+
+// refresh rebuilds the downlink resolver set, preserving per-resolver in-flight
+// state for resolvers that are still present. It is throttled unless force.
+func (p *downlinkPump) refresh(force bool) {
+	if p == nil || p.client == nil {
+		return
+	}
+
+	now := time.Now()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !force && !p.refreshedAt.IsZero() && now.Sub(p.refreshedAt) < downloadPumpRefreshInterval {
+		return
+	}
+	p.refreshedAt = now
+
+	resolvers := p.client.downloadPumpResolvers()
+	target := p.client.downloadPumpTarget()
+
+	next := make(map[string]*downlinkPumpState, len(resolvers))
+	order := make([]string, 0, len(resolvers))
+	for _, conn := range resolvers {
+		label := conn.ResolverLabel
+		if label == "" {
+			label = formatResolverEndpoint(conn.Resolver, conn.ResolverPort)
+		}
+		addr, err := p.client.getResolverUDPAddr(conn)
+		if err != nil || addr == nil {
+			continue
+		}
+		key := addr.String()
+		state := p.states[key]
+		if state == nil {
+			state = &downlinkPumpState{target: target}
+		}
+		state.conn = conn
+		state.addr = addr
+		state.label = label
+		if state.target < 1 {
+			state.target = target
+		}
+		next[key] = state
+		order = append(order, key)
+	}
+
+	p.states = next
+	p.order = order
+	if p.rr >= len(p.order) {
+		p.rr = 0
+	}
+}
+
+// reserve picks the next eligible resolver and tentatively books one in-flight
+// slot on it. The slot must be released with rollback on send failure or
+// settled by noteResponse when a response arrives.
+func (p *downlinkPump) reserve(now time.Time) *downlinkPumpState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	n := len(p.order)
+	for i := 0; i < n; i++ {
+		idx := (p.rr + i) % n
+		state := p.states[p.order[idx]]
+		if state == nil {
+			continue
+		}
+		if state.inflight >= state.target {
+			continue
+		}
+		if !state.lastSent.IsZero() && now.Sub(state.lastSent) < downloadPumpMinSendInterval {
+			continue
+		}
+		state.inflight++
+		state.lastSent = now
+		p.rr = (idx + 1) % n
+		return state
+	}
+	return nil
+}
+
+func (p *downlinkPump) rollback(state *downlinkPumpState) {
+	if p == nil || state == nil {
+		return
+	}
+	p.mu.Lock()
+	if state.inflight > 0 {
+		state.inflight--
+	}
+	p.mu.Unlock()
+}
+
+// noteResponse settles an in-flight poll for the resolver that answered.
+func (p *downlinkPump) noteResponse(addr *net.UDPAddr, size int) {
+	if p == nil || addr == nil {
+		return
+	}
+
+	key := addr.String()
+	now := time.Now()
+
+	p.mu.Lock()
+	state := p.states[key]
+	if state != nil {
+		if state.inflight > 0 {
+			state.inflight--
+		}
+		state.lastResp = now
+	}
+	p.mu.Unlock()
+
+	if state == nil {
+		return
+	}
+
+	client := p.client
+	client.pumpResponses.Add(1)
+	if size > 300 {
+		client.pumpDataResponses.Add(1)
+		client.pumpDataBytes.Add(int64(size))
+	} else {
+		client.pumpSmallResponse.Add(1)
+	}
+}
+
+func (p *downlinkPump) sender(ctx context.Context) {
+	defer p.client.asyncWG.Done()
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		// Only pump while a real (non-control) stream is active.
+		if !p.client.hasActiveDataStream() {
+			if !sleepWithContext(ctx, downloadPumpIdlePollInterval) {
+				return
+			}
+			continue
+		}
+
+		p.refresh(false)
+		state := p.reserve(time.Now())
+		if state == nil {
+			if !sleepWithContext(ctx, downloadPumpBackoffInterval) {
+				return
+			}
+			continue
+		}
+
+		if !p.send(ctx, state) {
+			p.rollback(state)
+			if !sleepWithContext(ctx, downloadPumpBackoffInterval) {
+				return
+			}
+		}
+	}
+}
+
+// send builds one PING query and hands it to the shared writer queue. Returning
+// false releases the reserved in-flight slot.
+func (p *downlinkPump) send(ctx context.Context, state *downlinkPumpState) bool {
+	client := p.client
+
+	payload, err := buildClientPingPayload()
+	if err != nil {
+		return false
+	}
+
+	p.mu.Lock()
+	state.seq++
+	seq := state.seq
+	p.mu.Unlock()
+
+	query, err := client.buildTunnelTXTQueryRaw(state.conn.Domain, VpnProto.BuildOptions{
+		SessionID:      client.sessionID,
+		SessionCookie:  client.sessionCookie,
+		PacketType:     Enums.PACKET_PING,
+		StreamID:       0,
+		SequenceNum:    uint16(seq),
+		FragmentID:     0,
+		TotalFragments: 1,
+		Payload:        payload,
+	})
+	if err != nil {
+		return false
+	}
+
+	task := writerTask{
+		frames: []encodedOutboundDatagram{{
+			addr:      state.addr,
+			serverKey: state.conn.Key,
+			packet:    query,
+		}},
+	}
+
+	select {
+	case client.encodedTXChannel <- task:
+		client.pumpRequests.Add(1)
+		return true
+	case <-ctx.Done():
+		return false
+	default:
+		// Writer queue is full; back off and retry.
+		return false
+	}
+}
+
+// maintenance reaps stalled polls and adapts the per-resolver in-flight target
+// (AIMD): ramp up while responses keep flowing, back off toward the configured
+// floor when they stop.
+func (p *downlinkPump) maintenance(ctx context.Context) {
+	defer p.client.asyncWG.Done()
+
+	ticker := time.NewTicker(downloadPumpMaintenanceInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			p.refresh(false)
+			p.maintain(now)
+		}
+	}
+}
+
+func (p *downlinkPump) maintain(now time.Time) {
+	base := p.client.downloadPumpTarget()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, state := range p.states {
+		// Reap stalled in-flight polls so a dead resolver does not permanently
+		// consume its budget.
+		if state.inflight > 0 && !state.lastSent.IsZero() && now.Sub(state.lastSent) > downloadPumpResponseTimeout {
+			state.inflight = 0
+		}
+		if state.lastResp.IsZero() {
+			continue
+		}
+
+		age := now.Sub(state.lastResp)
+		switch {
+		case age <= downloadPumpResponseTimeout/2:
+			if state.target < downloadPumpMaxInFlightPerResolver {
+				state.target++
+			}
+		case age > downloadPumpResponseTimeout:
+			if state.target > base {
+				state.target--
+			}
+		}
+	}
 }
 
 // runDownloadPumpReporter logs rolling 5s pump counters so it is obvious whether
@@ -174,195 +534,6 @@ func (c *Client) runDownloadPumpReporter(ctx context.Context) {
 	}
 }
 
-// downloadPumpSelectInterval throttles re-sorting the active resolver set while
-// pumps are polling.
-const downloadPumpSelectInterval = time.Second
-
-// downloadPumpConnections picks the best resolvers for pumping from the
-// downlink pool: highest download MTU first, then lowest resolve time. The
-// result is cached briefly so the selection follows MTU updates without
-// re-sorting on every poll.
-func (c *Client) downloadPumpConnections(forceRefresh bool) []Connection {
-	if c == nil || c.balancer == nil {
-		return nil
-	}
-
-	now := time.Now()
-	c.pumpSelectMu.Lock()
-	if !forceRefresh && c.pumpSelect != nil && now.Sub(c.pumpSelectAt) < downloadPumpSelectInterval {
-		selected := c.pumpSelect
-		c.pumpSelectMu.Unlock()
-		return selected
-	}
-	c.pumpSelectMu.Unlock()
-
-	active := c.downloadPumpPool()
-	if len(active) == 0 {
-		c.pumpSelectMu.Lock()
-		c.pumpSelect = nil
-		c.pumpSelectAt = now
-		c.pumpSelectMu.Unlock()
-		return nil
-	}
-
-	sort.SliceStable(active, func(i, j int) bool {
-		if active[i].DownloadMTUBytes != active[j].DownloadMTUBytes {
-			return active[i].DownloadMTUBytes > active[j].DownloadMTUBytes
-		}
-		return active[i].MTUResolveTime < active[j].MTUResolveTime
-	})
-
-	// Legacy path: cap to the configured N best resolvers after ranking. The
-	// directional split already defines the exact downlink pool size.
-	if c.cfg.DownlinkResolversPercent <= 0 {
-		n := c.effectiveDownloadPumpResolvers(len(active))
-		if n <= 0 {
-			active = nil
-		} else if n < len(active) {
-			active = active[:n]
-		}
-	}
-
-	selected := active
-
-	c.pumpSelectMu.Lock()
-	c.pumpSelect = selected
-	c.pumpSelectAt = now
-	c.pumpSelectMu.Unlock()
-	return selected
-}
-
-// downloadPumpConnectionAt returns the current slot-th best resolver, or false
-// when the downlink pool is smaller than the number of pump slots.
-func (c *Client) downloadPumpConnectionAt(slot int) (Connection, bool) {
-	if c == nil || c.balancer == nil {
-		return Connection{}, false
-	}
-	conns := c.downloadPumpConnections(false)
-	if slot < 0 || slot >= len(conns) {
-		return Connection{}, false
-	}
-	return conns[slot], true
-}
-
-func (p *downloadPump) worker(ctx context.Context) {
-	defer p.client.asyncWG.Done()
-
-	var (
-		conn         *net.UDPConn
-		connResolver string
-		localAddr    string
-		remoteAddr   *net.UDPAddr
-	)
-	defer func() {
-		if conn != nil {
-			_ = conn.Close()
-		}
-	}()
-
-	buf := make([]byte, 65535)
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		// Only pump while a real (non-control) stream is active.
-		if !p.client.hasActiveDataStream() {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(downloadPumpIdlePollInterval):
-			}
-			continue
-		}
-
-		current, ok := p.client.downloadPumpConnectionAt(p.slot)
-		if !ok {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(downloadPumpIdlePollInterval):
-			}
-			continue
-		}
-
-		// Follow the MTU-driven selection: switch to the current best resolver
-		// for this slot whenever it changes.
-		if conn == nil || current.ResolverLabel != connResolver {
-			if conn != nil {
-				_ = conn.Close()
-				conn = nil
-			}
-			dialed, err := dialUDPResolver(current.ResolverLabel)
-			if err != nil {
-				if p.client.log != nil {
-					p.client.log.Debugf("<yellow>[PUMP]</yellow> dial %s failed: %v", current.ResolverLabel, err)
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(downloadPumpIdlePollInterval):
-				}
-				continue
-			}
-			conn = dialed
-			connResolver = current.ResolverLabel
-			localAddr = ""
-			if conn.LocalAddr() != nil {
-				localAddr = conn.LocalAddr().String()
-			}
-			remoteAddr = nil
-			if conn.RemoteAddr() != nil {
-				remoteAddr, _ = conn.RemoteAddr().(*net.UDPAddr)
-			}
-		}
-
-		payload, err := buildClientPingPayload()
-		if err != nil {
-			continue
-		}
-		query, err := p.client.buildTunnelTXTQueryRaw(current.Domain, VpnProto.BuildOptions{
-			SessionID:      p.client.sessionID,
-			SessionCookie:  p.client.sessionCookie,
-			PacketType:     Enums.PACKET_PING,
-			StreamID:       0,
-			SequenceNum:    uint16(p.seq.Add(1)),
-			FragmentID:     0,
-			TotalFragments: 1,
-			Payload:        payload,
-		})
-		if err != nil {
-			continue
-		}
-
-		_ = conn.SetWriteDeadline(time.Now().Add(downloadPumpReadTimeout))
-		if _, err := conn.Write(query); err != nil {
-			// Force a fresh dial (and re-selection) next iteration.
-			_ = conn.Close()
-			conn = nil
-			connResolver = ""
-			continue
-		}
-		p.client.pumpRequests.Add(1)
-		_ = conn.SetReadDeadline(time.Now().Add(downloadPumpReadTimeout))
-		n, err := conn.Read(buf)
-		if err != nil || n < 12 {
-			continue
-		}
-		p.client.pumpResponses.Add(1)
-		if n > 300 {
-			p.client.pumpDataResponses.Add(1)
-			p.client.pumpDataBytes.Add(int64(n))
-		} else {
-			p.client.pumpSmallResponse.Add(1)
-		}
-		// Drop straight into the normal RX/ARQ pipeline. handleInboundPacket
-		// copies what it needs, so reusing buf is safe (same contract as the
-		// normal processor worker).
-		p.client.handleInboundPacket(buf[:n], remoteAddr, localAddr)
-	}
-}
-
 func (c *Client) hasActiveDataStream() bool {
 	c.streamsMu.RLock()
 	defer c.streamsMu.RUnlock()
@@ -372,4 +543,18 @@ func (c *Client) hasActiveDataStream() bool {
 		}
 	}
 	return false
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }

@@ -65,11 +65,10 @@ type Client struct {
 	pumpSmallResponse atomic.Int64
 	pumpDataBytes     atomic.Int64
 
-	// Cached best-resolver selection for the download pumps, refreshed
-	// periodically so the dedicated downloaders follow MTU updates.
-	pumpSelectMu sync.Mutex
-	pumpSelect   []Connection
-	pumpSelectAt time.Time
+	// downlinkPump is the async poll engine that pulls queued download packets
+	// on the downlink resolver partition. It is lock-free to read from the hot
+	// RX path (noteResponse) and replaced on each runtime start.
+	downlinkPump atomic.Pointer[downlinkPump]
 
 	successMTUChecks  bool
 	udpBufferPool     sync.Pool
